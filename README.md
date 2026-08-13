@@ -1,4 +1,4 @@
-<img width="128" height="128" alt="logo" src="https://github.com/user-attachments/assets/ac313f2b-4bba-49aa-b58d-76ee9638fdf0" />
+<img width="128" height="128" alt="SpeechLab logo" src="frontend/public/logo.png" />
 
 # SpeechLab — AI Voice Studio (Khmer)
 
