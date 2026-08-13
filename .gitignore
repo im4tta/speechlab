@@ -1,0 +1,38 @@
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+
+# ── Virtual environments / isolated engine envs ─────────────────────────
+backend/venv/
+backend/venv-*/
+backend/.uv-cache/
+
+# ── Model weights + runtime data (recreated on demand) ──────────────────
+backend/models/
+backend/cache/
+backend/uploads/
+
+# ── Runtime state / secrets ──────────────────────────────────────────────
+backend/.env
+backend/.last_engine
+backend/.last_asr_model
+*.log
+
+# ── Frontend ─────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ── OS / editors ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

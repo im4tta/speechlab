@@ -1,0 +1,485 @@
+import { useState } from "react";
+import { ChevronDown, Cpu, ExternalLink, FileAudio, Loader2, PackageX, Trash2, Volume2, X } from "lucide-react";
+import type { AsrStatus, EngineInfo } from "@/types/models";
+import { focusRing } from "@/lib/theme";
+
+interface Props {
+  isDark: boolean;
+  engines: EngineInfo[];
+  /** Speech-to-text model. Rendered as a non-switchable card so its weights
+   *  are manageable; null while /api/asr/status is in flight or errored. */
+  asr: AsrStatus | null;
+  activeName: string | null;
+  onSelect: (name: string) => Promise<void>;
+  onLoad: (name: string) => Promise<void>;
+  onInstall: (name: string) => void;
+  onDownload: (name: string) => void;
+  onDeleteWeights: (name: string) => void;
+  onUninstall: (name: string) => void;
+}
+
+export function EngineSelector({
+  isDark,
+  engines,
+  asr,
+  activeName,
+  onSelect,
+  onLoad,
+  onInstall,
+  onDownload,
+  onDeleteWeights,
+  onUninstall,
+}: Props) {
+  const [open, setOpen] = useState(false);
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
+  const active = engines.find((e) => e.name === activeName);
+  // Show "Engine" while the initial /api/engines fetch is in flight, or
+  // the active engine name once we know it. If `engines` is empty after
+  // the fetch (network/server error), keep showing "Engine" so the user
+  // knows something's wrong but the button is still clickable to retry.
+  const summary = active
+    ? active.display_name
+    : engines.length === 0
+      ? "Engine…"
+      : "Engine";
+
+  const handleSelect = async (name: string) => {
+    if (name === activeName) {
+      setOpen(false);
+      return;
+    }
+    setSwitchingTo(name);
+    try {
+      await onSelect(name);
+      // Kick off an eager load so the spinner shows during model load.
+      // onLoad resolves when the engine is ready.
+      try {
+        await onLoad(name);
+      } catch {
+        // Lazy-loaded engines may report load failures here; the
+        // synthesize endpoint will retry on first call.
+      }
+    } finally {
+      setSwitchingTo(null);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className={`w-full flex items-center justify-between gap-2 px-4 py-2.5 rounded-lg font-medium transition-colors border ${
+          isDark
+            ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border-zinc-700"
+            : "bg-white hover:bg-gray-200 text-gray-700 hover:text-gray-900 border-gray-300"
+        } ${focusRing}`}
+        title="Switch TTS engine"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <Cpu className="w-4 h-4 shrink-0" />
+          <span className="truncate">{summary}</span>
+        </span>
+        <ChevronDown className="w-4 h-4 shrink-0 opacity-70" />
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setOpen(false)}
+          />
+
+          {/* Modal */}
+          <div
+            className={`relative w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl shadow-2xl border ${
+              isDark ? "bg-zinc-900 border-zinc-800" : "bg-white border-gray-200"
+            }`}
+          >
+            <div
+              className={`px-5 py-4 border-b flex items-start justify-between gap-3 shrink-0 ${
+                isDark ? "border-zinc-800" : "border-gray-200"
+              }`}
+            >
+              <div>
+                <div
+                  className={`text-sm font-semibold ${
+                    isDark ? "text-white" : "text-gray-900"
+                  }`}
+                >
+                  TTS engine
+                </div>
+                <div
+                  className={`text-xs mt-0.5 ${
+                    isDark ? "text-zinc-400" : "text-gray-600"
+                  }`}
+                >
+                  Switch between backends. Only one runs at a time.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className={`p-1 rounded transition-colors ${
+                  isDark
+                    ? "text-zinc-400 hover:text-zinc-300"
+                    : "text-gray-600 hover:text-gray-600"
+                } ${focusRing}`}
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* One scroll region for every model. The speech-to-text group
+                must live inside it, not beside it: as a flex sibling of the
+                engines grid it was squeezed and overlapped the cards. */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {engines.map((e) => {
+              const isActive = e.name === activeName;
+              const switching = switchingTo === e.name;
+              const uninstallable =
+                e.name === "chatterbox" || e.name === "omnivoice" || e.name === "voxcpm" || e.name === "qwen";
+              // Destructive actions are hidden for the active engine (you must
+              // switch away first). Delete-weights needs downloaded weights;
+              // uninstall needs an isolated-venv engine that's installed.
+              const showDelete = !isActive && !!e.downloaded;
+              const showUninstall = !isActive && !!e.installed && uninstallable;
+              return (
+                <li
+                  key={e.name}
+                  className={`rounded-lg border p-4 ${
+                    isDark ? "border-zinc-800 bg-zinc-950/40" : "border-gray-300 bg-gray-50"
+                  }`}
+                >
+                  <div className="flex flex-col items-start gap-3">
+                    {/* Top row: engine icon (left) + destructive icon actions
+                        (right), mirroring the speaker icon across the card. */}
+                    <div className="flex items-center justify-between w-full">
+                      <div
+                        className={`mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                          isActive
+                            ? isDark ? "bg-indigo-600/20 text-indigo-400" : "bg-indigo-100 text-indigo-700"
+                            : isDark
+                              ? "bg-zinc-800 text-zinc-400"
+                              : "bg-gray-200 text-gray-700"
+                        }`}
+                      >
+                        {switching ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Volume2 className="w-4 h-4" />
+                        )}
+                      </div>
+                      {(showDelete || showUninstall) && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          {showDelete && (
+                            <button
+                              type="button"
+                              title="Delete downloaded weights"
+                              aria-label="Delete downloaded weights"
+                              onClick={() => {
+                                onDeleteWeights(e.name);
+                                setOpen(false);
+                              }}
+                              className={`p-1.5 rounded-md transition-colors ${
+                                isDark
+                                  ? "text-zinc-400 hover:text-red-400 hover:bg-red-500/10"
+                                  : "text-gray-500 hover:text-red-600 hover:bg-red-50"
+                              } ${focusRing}`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                          {showUninstall && (
+                            <button
+                              type="button"
+                              title="Uninstall isolated environment"
+                              aria-label="Uninstall isolated environment"
+                              onClick={() => {
+                                onUninstall(e.name);
+                                setOpen(false);
+                              }}
+                              className={`p-1.5 rounded-md transition-colors ${
+                                isDark
+                                  ? "text-zinc-400 hover:text-red-400 hover:bg-red-500/10"
+                                  : "text-gray-500 hover:text-red-600 hover:bg-red-50"
+                              } ${focusRing}`}
+                            >
+                              <PackageX className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0 w-full">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-sm font-medium ${
+                            isDark ? "text-white" : "text-gray-900"
+                          }`}
+                        >
+                          {e.display_name}
+                        </span>
+                        {isActive && (
+                          <span className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${isDark ? "bg-indigo-600/20 text-indigo-300" : "bg-indigo-100 text-indigo-700"}`}>
+                            Active
+                          </span>
+                        )}
+                        {e.loaded && !isActive && (
+                          <span
+                            className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                              isDark
+                                ? "bg-zinc-800 text-zinc-400"
+                                : "bg-gray-200 text-gray-600"
+                            }`}
+                          >
+                            Loaded
+                          </span>
+                        )}
+                      </div>
+                      <p
+                        className={`text-xs mt-0.5 ${
+                          isDark ? "text-zinc-400" : "text-gray-600"
+                        }`}
+                      >
+                        {e.description}
+                      </p>
+                      <div
+                        className={`text-xs mt-1.5 ${
+                          isDark ? "text-zinc-400" : "text-gray-600"
+                        }`}
+                      >
+                        {e.supports_voice_cloning
+                          ? "voice cloning"
+                          : "built-in voices only"}
+                        {" · "}
+                        {e.max_speakers === 1
+                          ? "single speaker"
+                          : `up to ${e.max_speakers} speakers`}
+                        {" · "}
+                        {e.sample_rate
+                          ? `${(e.sample_rate / 1000).toFixed(0)} kHz`
+                          : "—"}
+                        {e.license && e.license !== "unknown" && (
+                          <>
+                            {" · "}
+                            {e.model_url ? (
+                              <a
+                                href={e.model_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(ev) => ev.stopPropagation()}
+                                title={`${e.license} license — open the model card on Hugging Face`}
+                                className={`inline-flex items-center gap-0.5 underline decoration-dotted underline-offset-2 transition-colors ${
+                                  isDark ? "hover:text-indigo-400" : "hover:text-indigo-600"
+                                } ${focusRing}`}
+                              >
+                                {e.license}
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            ) : (
+                              e.license
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {e.installed === false ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onInstall(e.name);
+                            setOpen(false);
+                          }}
+                          className={`mt-2 w-full text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                            isDark
+                              ? "bg-indigo-700/40 hover:bg-indigo-700/60 text-indigo-200"
+                              : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
+                          } ${focusRing}`}
+                        >
+                          {`Install ${e.display_name}`}
+                        </button>
+                      ) : e.downloaded === false ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onDownload(e.name);
+                            setOpen(false);
+                          }}
+                          className={`mt-2 w-full text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                            isDark
+                              ? "bg-indigo-700/40 hover:bg-indigo-700/60 text-indigo-200"
+                              : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
+                          } ${focusRing}`}
+                        >
+                          {`Download ${e.display_name}`}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleSelect(e.name)}
+                          disabled={isActive}
+                          className={`mt-2 w-full text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                            isActive
+                              ? isDark ? "bg-indigo-600/20 text-indigo-300 cursor-default" : "bg-indigo-100 text-indigo-800 cursor-default"
+                              : isDark
+                                ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+                                : "bg-gray-200 hover:bg-gray-300 text-gray-900"
+                          } ${focusRing}`}
+                        >
+                          {isActive
+                            ? "Currently active"
+                            : switching
+                              ? "Loading…"
+                              : `Switch to ${e.display_name}`}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+            </ul>
+
+            {/* Speech-to-text. Whisper is audio->text, so it has no Switch:
+                it can't be "the active TTS engine" and is deliberately absent
+                from EngineManager. It lives here anyway because this popup is
+                also the model manager — without it there'd be no way to
+                reclaim its weights. */}
+            {asr && (
+              <div>
+                <h3
+                  className={`text-[11px] font-semibold uppercase tracking-wide mb-2 ${
+                    isDark ? "text-zinc-400" : "text-gray-600"
+                  }`}
+                >
+                  Speech-to-text
+                </h3>
+                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <li
+                    className={`rounded-lg border p-4 ${
+                      isDark ? "border-zinc-800 bg-zinc-950/40" : "border-gray-300 bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex flex-col items-start gap-3">
+                      <div className="flex items-center justify-between w-full">
+                        <div
+                          className={`mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                            isDark ? "bg-zinc-800 text-zinc-400" : "bg-gray-200 text-gray-700"
+                          }`}
+                        >
+                          <FileAudio className="w-4 h-4" />
+                        </div>
+                        {asr.downloaded && (
+                          <button
+                            type="button"
+                            title="Delete downloaded weights"
+                            aria-label="Delete downloaded weights"
+                            onClick={() => {
+                              onDeleteWeights(asr.name);
+                              setOpen(false);
+                            }}
+                            className={`p-1.5 rounded-md transition-colors shrink-0 ${
+                              isDark
+                                ? "text-zinc-400 hover:text-red-400 hover:bg-red-500/10"
+                                : "text-gray-500 hover:text-red-600 hover:bg-red-50"
+                            } ${focusRing}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 w-full">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-sm font-medium ${isDark ? "text-white" : "text-gray-900"}`}>
+                            {asr.display_name}
+                          </span>
+                          {asr.loaded && (
+                            <span
+                              className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                                isDark ? "bg-zinc-800 text-zinc-400" : "bg-gray-200 text-gray-600"
+                              }`}
+                            >
+                              Loaded
+                            </span>
+                          )}
+                        </div>
+                        <p className={`text-xs mt-0.5 ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
+                          {asr.description}
+                        </p>
+                        <div className={`text-xs mt-1.5 ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
+                          {asr.languages.length > 0 ? `${asr.languages.length} languages` : "speech-to-text"}
+                          {" · 16 kHz · "}
+                          {asr.model_url ? (
+                            <a
+                              href={asr.model_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(ev) => ev.stopPropagation()}
+                              title={`${asr.license} license — open the model card on Hugging Face`}
+                              className={`inline-flex items-center gap-0.5 underline decoration-dotted underline-offset-2 transition-colors ${
+                                isDark ? "hover:text-indigo-400" : "hover:text-indigo-600"
+                              } ${focusRing}`}
+                            >
+                              {asr.license}
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          ) : (
+                            asr.license
+                          )}
+                        </div>
+                        {asr.downloaded ? (
+                          <p
+                            className={`mt-2 text-xs px-3 py-1.5 rounded-md text-center ${
+                              isDark ? "bg-zinc-800/60 text-zinc-400" : "bg-gray-200/70 text-gray-600"
+                            }`}
+                          >
+                            Used by Transcribe mode
+                          </p>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onDownload(asr.name);
+                              setOpen(false);
+                            }}
+                            className={`mt-2 w-full text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                              isDark
+                                ? "bg-indigo-700/40 hover:bg-indigo-700/60 text-indigo-200"
+                                : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
+                            } ${focusRing}`}
+                          >
+                            {`Download ${asr.display_name}`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            )}
+            </div>
+
+            <div
+              className={`px-5 py-3 text-[11px] border-t shrink-0 ${
+                isDark
+                  ? "border-zinc-800 text-zinc-400"
+                  : "border-gray-200 text-gray-600"
+              }`}
+            >
+              Switching unloads the current model. First synthesis may take
+              a few seconds while weights load.
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

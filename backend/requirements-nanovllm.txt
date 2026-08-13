@@ -1,0 +1,15 @@
+nano-vllm-voxcpm
+soundfile
+numpy
+# torch + torchaudio are installed separately by studio.py with a CUDA-matched
+# wheel (see _ensure_nanovllm_env). Do NOT pin torch here.
+#
+# flash-attn is required by nano-vllm-voxcpm at import time and is NOT
+# installable via a plain PyPI wheel resolution on most systems — it needs a
+# build matching the exact torch/CUDA/Python ABI. studio.py installs a
+# prebuilt wheel when it can find one for the detected combination; if it
+# can't, follow deployment/README.md in the nanovllm-voxcpm upstream repo to
+# install a matching wheel by hand (or build from source, which needs the
+# NVIDIA CUDA Toolkit with nvcc on PATH). Windows: automated flash-attn
+# compilation is skipped by nano-vllm-voxcpm's own setup step — see its
+# README's Windows note.

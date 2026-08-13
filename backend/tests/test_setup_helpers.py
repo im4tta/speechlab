@@ -1,0 +1,427 @@
+"""Unit tests for the Voice Studio setup/launch pure helpers."""
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from tools import envdetect  # noqa: E402
+from tools.envdetect import detect_voxcpm_cuda_tag, cuda_version_to_voxcpm_tag  # noqa: E402
+from tools.envdetect import detect_qwen_cuda_tag, cuda_version_to_qwen_tag  # noqa: E402
+import studio  # noqa: E402
+
+
+def test_uv_executable_path():
+    # Test current-OS behavior without flipping os.name globally (that breaks
+    # pathlib). Mirrors how the existing venv_python helper is (un)tested.
+    p = studio.uv_executable_path(Path("/repo"))
+    if studio.os.name == "nt":
+        assert p == Path("/repo/backend/venv/Scripts/uv.exe")
+    else:
+        assert p == Path("/repo/backend/venv/bin/uv")
+
+
+def test_uv_cache_dir():
+    assert studio.uv_cache_dir(Path("/repo")) == Path("/repo/backend/.uv-cache")
+
+
+def test_main_venv_torch_tag_parses_distinfo(tmp_path, monkeypatch):
+    monkeypatch.setattr(studio.os, "name", "nt")
+    sp = tmp_path / "backend" / "venv" / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "torch-2.6.0+cu124.dist-info").mkdir()
+    assert studio.main_venv_torch_tag(tmp_path) == "cu124"
+
+
+def test_main_venv_torch_tag_cpu_build_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(studio.os, "name", "nt")
+    sp = tmp_path / "backend" / "venv" / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "torch-2.6.0+cpu.dist-info").mkdir()
+    assert studio.main_venv_torch_tag(tmp_path) is None
+
+
+def test_main_venv_torch_tag_missing_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(studio.os, "name", "nt")
+    assert studio.main_venv_torch_tag(tmp_path) is None
+
+
+def test_chatterbox_tag_prefers_main_tag():
+    # When the main venv runs cu124 (proof the driver supports it), reuse it.
+    assert studio._chatterbox_torch_tag("cu118", preferred_tag="cu124") == "cu124"
+    assert studio._chatterbox_torch_tag("cu124", preferred_tag="cu118") == "cu118"
+
+
+def test_chatterbox_tag_fallback_without_preferred():
+    # Original behavior preserved when there's no preferred tag.
+    assert studio._chatterbox_torch_tag("cu124") == "cu124"
+    assert studio._chatterbox_torch_tag("cu121") == "cu118"
+    assert studio._chatterbox_torch_tag("cu118") == "cu118"
+    assert studio._chatterbox_torch_tag(None) is None
+    assert studio._chatterbox_torch_tag("cpu") is None
+
+
+def test_engine_venv_python_current_os():
+    p = studio._engine_venv_python(Path("/x/venv-qwen"))
+    if studio.os.name == "nt":
+        assert p == Path("/x/venv-qwen/Scripts/python.exe")
+    else:
+        assert p == Path("/x/venv-qwen/bin/python")
+
+
+def test_uv_venv_cmd_includes_python():
+    # Must pass --python so uv uses the same interpreter as `python -m venv`
+    # would (preserves VoxCPM's 3.10–3.12 requirement).
+    uv, venv = Path("/uv"), Path("/v")
+    cmd = studio._uv_venv_cmd(uv, venv, "/py")
+    assert cmd == [str(uv), "venv", "--python", "/py", str(venv)]
+
+
+def test_uv_pip_install_cmd():
+    uv, venv = Path("/uv"), Path("/v")
+    cmd = studio._uv_pip_install_cmd(uv, venv, ["-r", "req.txt"])
+    py = studio._engine_venv_python(venv)
+    assert cmd == [str(uv), "pip", "install", "--python", str(py), "-r", "req.txt"]
+
+
+def test_installed_engine_venvs_filters_by_marker(tmp_path):
+    # Only engines whose ready-marker exists are returned.
+    (tmp_path / "backend" / "venv-qwen").mkdir(parents=True)
+    (tmp_path / "backend" / "venv-qwen" / ".qwen-ready").write_text("ok")
+    names = [name for name, _vd, _mk, _fn in studio.installed_engine_venvs(tmp_path)]
+    assert names == ["qwen"]
+
+
+def test_installed_engine_venvs_empty(tmp_path):
+    assert studio.installed_engine_venvs(tmp_path) == []
+
+
+def test_dir_size_bytes(tmp_path):
+    (tmp_path / "a.bin").write_bytes(b"\x00" * 1000)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.bin").write_bytes(b"\x00" * 500)
+    assert studio._dir_size_bytes(tmp_path) == 1500
+    assert studio._dir_size_bytes(tmp_path / "missing") == 0
+
+_SAMPLE_SMI = """
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 552.22       Driver Version: 552.22       CUDA Version: 12.4      |
+|-------------------------------+----------------------+----------------------+
+"""
+
+
+def test_parse_cuda_version_found():
+    assert envdetect.parse_nvidia_smi_cuda_version(_SAMPLE_SMI) == "12.4"
+
+
+def test_parse_cuda_version_missing():
+    assert envdetect.parse_nvidia_smi_cuda_version("no cuda here") is None
+
+
+def test_cuda_version_to_tag():
+    assert envdetect.cuda_version_to_tag("12.4") == "cu124"
+    assert envdetect.cuda_version_to_tag("12.6") == "cu124"
+    assert envdetect.cuda_version_to_tag("12.1") == "cu121"
+    assert envdetect.cuda_version_to_tag("12.0") == "cu121"
+    assert envdetect.cuda_version_to_tag("11.8") == "cu118"
+    # Modern drivers report CUDA 13.x; they run cu124 wheels natively.
+    assert envdetect.cuda_version_to_tag("13.2") == "cu124"
+    assert envdetect.cuda_version_to_tag("13.0") == "cu124"
+    assert envdetect.cuda_version_to_tag("10.2") is None
+    assert envdetect.cuda_version_to_tag(None) is None
+
+
+def test_torch_index_url():
+    assert envdetect.torch_index_url("cu124") == "https://download.pytorch.org/whl/cu124"
+    assert envdetect.torch_index_url("cu118") == "https://download.pytorch.org/whl/cu118"
+    assert envdetect.torch_index_url(None) is None
+    assert envdetect.torch_index_url("cpu") is None
+    assert envdetect.torch_index_url("mps") is None
+
+
+def test_detect_cuda_tag_with_injected_runner():
+    assert envdetect.detect_cuda_tag(runner=lambda: _SAMPLE_SMI) == "cu124"
+    assert envdetect.detect_cuda_tag(runner=lambda: None) is None
+
+
+from backend.scripts import download_models as dm  # noqa: E402
+
+
+def test_parse_model_selection_basic():
+    assert dm.parse_model_selection("kokoro,chatterbox") == ["kokoro", "chatterbox"]
+
+
+def test_parse_model_selection_dedupes_and_lowercases():
+    assert dm.parse_model_selection("Kokoro, kokoro , VIBEVOICE") == ["kokoro", "vibevoice"]
+
+
+def test_parse_model_selection_rejects_unknown():
+    import pytest
+    with pytest.raises(ValueError):
+        dm.parse_model_selection("kokoro,bogus")
+
+
+def test_catalog_has_expected_engines():
+    # "whisper" is ASR and "m2m100"/"madlad" are translators — not TTS engines,
+    # but they ride the same weight downloader.
+    assert set(dm.MODEL_CATALOG) == {"vibevoice", "kokoro", "kitten", "chatterbox",
+                                     "omnivoice", "voxcpm", "qwen", "whisper",
+                                     "m2m100", "m2m100_large"}
+    assert dm.MODEL_CATALOG["kokoro"]["repo_id"] == "hexgrad/Kokoro-82M"
+    assert dm.MODEL_CATALOG["omnivoice"]["repo_id"] == "k2-fsa/OmniVoice"
+
+
+def test_catalog_entries_are_complete():
+    """Every entry needs the three fields `--list` (and the picker) render."""
+    for key, entry in dm.MODEL_CATALOG.items():
+        assert entry["repo_id"], key
+        assert entry["label"], key
+        assert entry["size"], key
+
+
+def test_list_catalog_emits_every_entry_in_order():
+    """studio.py's picker builds its menu from this, instead of a hand-mirrored
+    copy that silently rots when an engine is added."""
+    rows = dm.list_catalog()
+    assert [r["key"] for r in rows] == list(dm.MODEL_CATALOG)
+    assert {"key", "label", "size"} <= set(rows[0])
+    assert any(r["key"] == "whisper" for r in rows)
+
+
+def test_list_catalog_is_json_serializable():
+    import json
+
+    parsed = json.loads(json.dumps(dm.list_catalog()))
+    assert parsed[0]["key"] == "vibevoice"
+
+
+def test_mount_frontend_serves_index_when_dist_present(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.app import _mount_frontend
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>voice studio</html>", encoding="utf-8")
+
+    app = FastAPI()
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok"}
+
+    _mount_frontend(app, dist)
+    client = TestClient(app)
+
+    assert client.get("/api/health").json() == {"status": "ok"}
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "voice studio" in root.text
+
+
+def test_mount_frontend_noop_when_dist_absent(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.app import _mount_frontend
+
+    app = FastAPI()
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok"}
+
+    _mount_frontend(app, tmp_path / "missing-dist")
+    client = TestClient(app)
+
+    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/").status_code == 404
+
+
+import studio  # noqa: E402
+
+
+def test_venv_python_path_shape():
+    repo = Path("/repo")
+    p = studio.venv_python(repo)
+    # Either Scripts/python.exe (Windows) or bin/python (POSIX)
+    assert p.name in ("python.exe", "python")
+    assert "venv" in p.parts
+
+
+def test_build_backend_cmd_forwards_passthrough():
+    cmd = studio.build_backend_cmd(Path("/repo/backend/venv/bin/python"),
+                                   ["--device", "cuda", "--port", "9000"])
+    assert cmd[:3] == ["/repo/backend/venv/bin/python", "-m", "backend.cli"]
+    assert cmd[-4:] == ["--device", "cuda", "--port", "9000"]
+
+
+def test_chatterbox_venv_python_path_shape():
+    repo = Path("/repo")
+    p = studio.chatterbox_venv_python(repo)
+    assert p.name in ("python.exe", "python")
+    assert "venv-chatterbox" in p.parts
+
+
+def test_install_chatterbox_subcommand_success(monkeypatch):
+    calls = {"n": 0}
+    def _fake():
+        calls["n"] += 1
+        return True
+    monkeypatch.setattr(studio, "_ensure_chatterbox_env", _fake)
+    assert studio.main(["install-chatterbox"]) == 0
+    assert calls["n"] == 1
+
+
+def test_install_chatterbox_subcommand_failure(monkeypatch):
+    monkeypatch.setattr(studio, "_ensure_chatterbox_env", lambda: False)
+    assert studio.main(["install-chatterbox"]) == 1
+
+
+def test_chatterbox_torch_tag_maps_driver_to_compatible_build():
+    # cu121 lacks modern torch builds and cu124 needs a 12.4 driver, so a
+    # cu121/cu118 driver must fall back to cu118 (CUDA 11.8 runs everywhere).
+    assert studio._chatterbox_torch_tag("cu124") == "cu124"
+    assert studio._chatterbox_torch_tag("cu121") == "cu118"
+    assert studio._chatterbox_torch_tag("cu118") == "cu118"
+    assert studio._chatterbox_torch_tag(None) is None
+    assert studio._chatterbox_torch_tag("cpu") is None
+
+
+def test_backend_port_parsing():
+    assert studio._backend_port([]) == 8880
+    assert studio._backend_port(["--device", "cuda"]) == 8880
+    assert studio._backend_port(["--port", "9000"]) == 9000
+    assert studio._backend_port(["--device", "cuda", "--port", "9100"]) == 9100
+    assert studio._backend_port(["--port=9200"]) == 9200
+    assert studio._backend_port(["--port", "notanint"]) == 8880
+
+
+def test_cuda_version_to_omnivoice_tag():
+    # torch 2.8 wheels: cu128 (CUDA 12.8+/13.x), cu126 (12.6-12.7), else CPU.
+    assert envdetect.cuda_version_to_omnivoice_tag("13.2") == "cu128"
+    assert envdetect.cuda_version_to_omnivoice_tag("12.8") == "cu128"
+    assert envdetect.cuda_version_to_omnivoice_tag("12.6") == "cu126"
+    assert envdetect.cuda_version_to_omnivoice_tag("12.4") is None
+    assert envdetect.cuda_version_to_omnivoice_tag("11.8") is None
+    assert envdetect.cuda_version_to_omnivoice_tag(None) is None
+
+
+def test_omnivoice_torch_index_urls_present():
+    assert envdetect.torch_index_url("cu128") == "https://download.pytorch.org/whl/cu128"
+    assert envdetect.torch_index_url("cu126") == "https://download.pytorch.org/whl/cu126"
+
+
+def test_detect_omnivoice_cuda_tag_with_injected_runner():
+    smi = "Driver Version: 596.21       CUDA Version: 13.2"
+    assert envdetect.detect_omnivoice_cuda_tag(runner=lambda: smi) == "cu128"
+    assert envdetect.detect_omnivoice_cuda_tag(runner=lambda: None) is None
+
+
+def test_omnivoice_venv_python_path_shape():
+    repo = Path("/repo")
+    p = studio.omnivoice_venv_python(repo)
+    assert p.name in ("python.exe", "python")
+    assert "venv-omnivoice" in p.parts
+
+
+def test_omnivoice_ready_marker_path():
+    repo = Path("/repo")
+    m = studio.omnivoice_ready_marker(repo)
+    assert m.name == ".omnivoice-ready"
+    assert "venv-omnivoice" in m.parts
+
+
+def test_install_omnivoice_subcommand_success(monkeypatch):
+    calls = {"n": 0}
+    def _fake():
+        calls["n"] += 1
+        return True
+    monkeypatch.setattr(studio, "_ensure_omnivoice_env", _fake)
+    assert studio.main(["install-omnivoice"]) == 0
+    assert calls["n"] == 1
+
+
+def test_install_omnivoice_subcommand_failure(monkeypatch):
+    monkeypatch.setattr(studio, "_ensure_omnivoice_env", lambda: False)
+    assert studio.main(["install-omnivoice"]) == 1
+
+
+def test_cuda_version_to_voxcpm_tag():
+    assert cuda_version_to_voxcpm_tag("13.0") == "cu128"
+    assert cuda_version_to_voxcpm_tag("12.8") == "cu128"
+    assert cuda_version_to_voxcpm_tag("12.6") == "cu126"
+    assert cuda_version_to_voxcpm_tag("12.4") is None  # below cu126 → CPU fallback
+    assert cuda_version_to_voxcpm_tag(None) is None
+
+
+def test_detect_voxcpm_cuda_tag_uses_runner():
+    fake = lambda: "NVIDIA-SMI ... CUDA Version: 12.8 ..."
+    assert detect_voxcpm_cuda_tag(runner=fake) == "cu128"
+
+
+def test_python_supported_for_voxcpm():
+    import studio
+    assert studio._python_supported_for_voxcpm((3, 11)) is True
+    assert studio._python_supported_for_voxcpm((3, 12)) is True
+    assert studio._python_supported_for_voxcpm((3, 13)) is False
+    assert studio._python_supported_for_voxcpm((3, 9)) is False
+    assert studio._python_supported_for_voxcpm((3, 10)) is True   # lower-inclusive boundary
+    assert studio._python_supported_for_voxcpm((4, 0)) is False   # wrong major version
+    assert studio._python_supported_for_voxcpm((4, 11)) is False
+
+
+def test_cuda_version_to_qwen_tag():
+    assert cuda_version_to_qwen_tag("13.0") == "cu128"
+    assert cuda_version_to_qwen_tag("12.8") == "cu128"
+    assert cuda_version_to_qwen_tag("12.6") == "cu126"
+    assert cuda_version_to_qwen_tag("12.4") is None
+    assert cuda_version_to_qwen_tag(None) is None
+
+
+def test_detect_qwen_cuda_tag_uses_runner():
+    assert detect_qwen_cuda_tag(runner=lambda: "CUDA Version: 12.8") == "cu128"
+
+
+def test_remote_is_voice_studio():
+    import studio
+    assert studio.remote_is_voice_studio("https://github.com/im4tta/voice-studio.git")
+    assert studio.remote_is_voice_studio("git@github.com:im4tta/voice-studio.git")
+    assert not studio.remote_is_voice_studio("https://github.com/someoneelse/other.git")
+    assert not studio.remote_is_voice_studio("")
+
+
+def test_worktree_is_clean():
+    import studio
+    assert studio.worktree_is_clean("") is True
+    assert studio.worktree_is_clean("   \n  ") is True
+    assert studio.worktree_is_clean(" M backend/app.py\n") is False
+    assert studio.worktree_is_clean("?? newfile\n") is False
+
+
+
+
+def test_repo_total_bytes_sums_siblings(monkeypatch):
+    import backend.services.model_download as md
+
+    class _Sib:
+        def __init__(self, n, s):
+            self.rfilename, self.size, self.lfs = n, s, None
+
+    class _Api:
+        def model_info(self, *a, **kw):
+            return type("I", (), {"siblings": [_Sib("model.safetensors", 100),
+                                               _Sib("config.json", 900)]})()
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: _Api())
+    assert md._repo_total_bytes("x") == 1000
+
+
+def test_no_music_engine_registered():
+    """MusicGen was removed; nothing should reintroduce a music engine."""
+    from backend.scripts import download_models as dm
+    from backend.services.model_download import DOWNLOADABLE
+    assert "musicgen" not in dm.MODEL_CATALOG
+    assert "musicgen" not in DOWNLOADABLE

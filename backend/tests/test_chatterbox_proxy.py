@@ -1,0 +1,201 @@
+"""Tests for the Chatterbox proxy engine using a STUB worker.
+
+No real chatterbox-tts is required: we point the proxy at a tiny stub
+worker script run by the MAIN venv's Python. The stub speaks the same
+JSON protocol and writes a small valid WAV.
+"""
+
+import sys
+import textwrap
+import wave
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from backend.core.engines import EngineSynthRequest  # noqa: E402
+from backend.core.engines.chatterbox_engine import ChatterboxEngine  # noqa: E402
+
+# A stub worker: same protocol, writes 100 samples of silence as a WAV.
+_STUB_WORKER = textwrap.dedent('''
+    import json, sys, wave
+    def reply(o): sys.stdout.write(json.dumps(o)+"\\n"); sys.stdout.flush()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line: continue
+        req = json.loads(line)
+        op = req.get("op")
+        if op == "load":
+            reply({"ok": True})
+        elif op == "synth":
+            with wave.open(req["out_wav"], "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(b"\\x00\\x00" * 100)
+            reply({"ok": True, "sample_rate": 24000, "duration_sec": 100/24000, "inference_ms": 7})
+        elif op == "shutdown":
+            reply({"ok": True}); break
+        else:
+            reply({"ok": False, "error": "bad op"})
+''')
+
+
+def _make_stub_engine(tmp_path: Path) -> ChatterboxEngine:
+    stub = tmp_path / "stub_worker.py"
+    stub.write_text(_STUB_WORKER, encoding="utf-8")
+    return ChatterboxEngine(
+        worker_python=Path(sys.executable),  # the main venv python runs the stub
+        worker_script=stub,
+    )
+
+
+def test_load_then_is_loaded(tmp_path):
+    eng = _make_stub_engine(tmp_path)
+    assert eng.is_loaded() is False
+    eng.load()
+    assert eng.is_loaded() is True
+    eng.unload()
+    assert eng.is_loaded() is False
+
+
+def test_synthesize_returns_wav_bytes(tmp_path):
+    eng = _make_stub_engine(tmp_path)
+    eng.load()
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFF")  # stub ignores contents
+    req = EngineSynthRequest(
+        text="hello", voice_id="x", reference_audio=str(ref),
+        language_id="en", cfg_weight=0.5, exaggeration=0.5,
+    )
+    result = eng.synthesize(req)
+    assert result.sample_rate == 24000
+    assert result.wav_bytes[:4] == b"RIFF"
+    assert result.wav_bytes[8:12] == b"WAVE"
+    eng.unload()
+
+
+def test_load_raises_when_venv_missing(tmp_path):
+    # Point at a non-existent python so the friendly error fires.
+    eng = ChatterboxEngine(
+        worker_python=tmp_path / "no" / "such" / "python.exe",
+        worker_script=tmp_path / "missing_worker.py",
+    )
+    try:
+        eng.load()
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "studio.py models" in str(exc)
+
+
+def test_capabilities_unchanged(tmp_path):
+    eng = _make_stub_engine(tmp_path)
+    assert eng.name == "chatterbox"
+    assert eng.sample_rate() == 24000
+    assert eng.max_speakers() == 1
+    assert eng.supports_voice_cloning() is True
+    assert eng.supports_streaming() is False
+    assert eng.available_voices() == []
+
+
+# A stub that floods stderr (256 KB) BEFORE replying to load. Without the
+# background stderr drain, the worker blocks writing stderr while the parent
+# blocks on stdout.readline() — a classic pipe deadlock. With the drain, load()
+# completes promptly. (If this regresses, the test hangs rather than fails.)
+_CHATTY_WORKER = textwrap.dedent('''
+    import json, sys
+    def reply(o): sys.stdout.write(json.dumps(o)+"\\n"); sys.stdout.flush()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line: continue
+        req = json.loads(line)
+        if req.get("op") == "load":
+            sys.stderr.write("x" * 262144 + "\\n"); sys.stderr.flush()
+            reply({"ok": True})
+        elif req.get("op") == "shutdown":
+            reply({"ok": True}); break
+        else:
+            reply({"ok": False, "error": "bad op"})
+''')
+
+
+def test_load_survives_chatty_stderr(tmp_path):
+    stub = tmp_path / "chatty_worker.py"
+    stub.write_text(_CHATTY_WORKER, encoding="utf-8")
+    eng = ChatterboxEngine(worker_python=Path(sys.executable), worker_script=stub)
+    eng.load()  # must not deadlock despite 256 KB of stderr before the reply
+    assert eng.is_loaded() is True
+    eng.unload()
+
+
+def test_installed_flag_requires_ready_marker(tmp_path):
+    # Simulate a half-built venv: python.exe exists (created by `python -m venv`)
+    # but the install never finished, so no .chatterbox-ready marker.
+    venv = tmp_path / "venv-chatterbox"
+    (venv / "Scripts").mkdir(parents=True)
+    py = venv / "Scripts" / "python.exe"
+    py.write_text("", encoding="utf-8")
+    eng = ChatterboxEngine(worker_python=py, worker_script=tmp_path / "w.py")
+
+    # Python present but NO marker → NOT installed (this is the bug we fixed).
+    assert eng.installed() is False
+    assert eng.info()["installed"] is False
+
+    # Marker written by a successful install → installed.
+    (venv / ".chatterbox-ready").write_text("ok", encoding="utf-8")
+    assert eng.installed() is True
+    assert eng.info()["installed"] is True
+
+
+def test_concurrent_load_calls_popen_once(tmp_path, monkeypatch):
+    """Two threads calling load() simultaneously must spawn exactly one worker."""
+    import threading
+    import subprocess as _subprocess
+
+    popen_count = 0
+    count_lock = threading.Lock()
+    real_popen = _subprocess.Popen
+
+    def counting_popen(*args, **kwargs):
+        nonlocal popen_count
+        with count_lock:
+            popen_count += 1
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "backend.core.engines.chatterbox_engine.subprocess.Popen",
+        counting_popen,
+    )
+
+    eng = _make_stub_engine(tmp_path)
+    barrier = threading.Barrier(2)
+    thread_errors = []
+    errors_lock = threading.Lock()
+
+    def load_with_barrier():
+        barrier.wait()
+        try:
+            eng.load()
+        except Exception as exc:  # noqa: BLE001
+            with errors_lock:
+                thread_errors.append(exc)
+
+    threads = [threading.Thread(target=load_with_barrier) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=3.0)
+
+    assert not any(t.is_alive() for t in threads), "threads did not finish — possible deadlock"
+    assert thread_errors == [], f"threads raised: {thread_errors}"
+    assert popen_count == 1
+    assert eng.is_loaded() is True
+    eng.unload()
+
+
+def test_sequential_load_idempotent(tmp_path):
+    """A second sequential load() reuses the existing worker proc."""
+    eng = _make_stub_engine(tmp_path)
+    eng.load()
+    first_proc = eng._proc
+    eng.load()
+    assert eng._proc is first_proc
+    eng.unload()

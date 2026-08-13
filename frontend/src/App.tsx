@@ -1,0 +1,1312 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
+import { focusRing } from "@/lib/theme";
+
+import { ConfirmProvider } from "@/components/ConfirmProvider";
+import { InstallEngineDialog } from "@/components/InstallEngineDialog";
+import { DownloadModelDialog } from "@/components/DownloadModelDialog";
+import { DeleteWeightsDialog } from "@/components/DeleteWeightsDialog";
+import { UninstallEngineDialog } from "@/components/UninstallEngineDialog";
+import { SegmentCard } from "@/components/SegmentCard";
+import { SpeakerRoster } from "@/components/SpeakerRoster";
+import { MiddleToolbar } from "@/components/MiddleToolbar";
+import { ModeChooser } from "@/components/ModeChooser";
+import { TranscribeEditor } from "@/components/TranscribeEditor";
+import { DubEditor } from "@/components/DubEditor";
+import { TtsEditor } from "@/components/TtsEditor";
+import { InlinePlayer } from "@/components/InlinePlayer";
+import { BrandFooter } from "@/components/BrandFooter";
+import { SynthProgressPanel } from "@/components/SynthProgressPanel";
+import { TopBar } from "@/components/TopBar";
+import { SystemMonitorWidget } from "@/components/SystemMonitorWidget";
+import { CreditsDialog } from "@/components/CreditsDialog";
+import { FullScreenPage } from "@/components/FullScreenPage";
+import { useCacheData } from "@/components/CachePanel";
+import { useConfig } from "@/hooks/useConfig";
+import { useVoices } from "@/hooks/useVoices";
+import { useEngine } from "@/hooks/useEngine";
+import { useProjectMode } from "@/hooks/useProjectMode";
+import { useAsrStatus } from "@/hooks/useAsrStatus";
+import { useTranslateStatus } from "@/hooks/useTranslateStatus";
+import { ApiError, activateAsrModel, activateTranslator, downloadPodcast, synthesizeWav, transcribe, updateVoiceMeta } from "@/lib/api";
+import { segmentsToSrt } from "@/lib/subtitles";
+import {
+  AudioPlayer,
+  wavToPcm16,
+} from "@/lib/audio";
+import { loadSample, loadTtsSample, type Sample, type TtsSample } from "@/lib/samples";
+import { addTtsText, clearTtsHistory, loadTtsHistory, type TtsHistoryItem } from "@/lib/ttsHistory";
+import { useProject } from "@/lib/store";
+import type { CachedAudio, Project, Speaker, SynthSpeaker, VoiceMetadata } from "@/types/models";
+import { getDefaultCfgForEngine } from "@/lib/engineHints";
+import { effectiveMode, type OmniMode } from "@/lib/voiceModes";
+import { TooNarrowBanner } from "@/components/TooNarrowBanner";
+import { useViewportWidth } from "@/hooks/useViewportWidth";
+import { showNarrowBanner } from "@/lib/layout";
+
+const TTS_SEG_ID = "__tts__";
+
+// VoxCPM diffusion quality → inference_timesteps. Higher = better quality, slower.
+const QUALITY_TIMESTEPS = { fast: 5, balanced: 10, high: 25 } as const;
+
+// Qwen3-TTS CustomVoice advanced sampling defaults. Threaded through synth requests
+// when the Qwen engine is active; persisted in localStorage (vs.qwen.params).
+const QWEN_DEFAULTS = { temperature: 0.9, topP: 0.9, topK: 50, repetitionPenalty: 1.1, seed: null as number | null };
+type QwenParams = typeof QWEN_DEFAULTS;
+
+type Theme = "light" | "dark";
+
+function isSegmentCached(
+  segment: { id: string; text: string; speakerId: string | null },
+  cache: Record<string, CachedAudio>,
+  speakers: Speaker[],
+  supportsVoiceModes: boolean,
+  supportsStylePrompt: boolean,
+  effectiveQuality: "fast" | "balanced" | "high" | undefined,
+  effectiveGenSig: string | undefined,
+): { cached: boolean; voice: string | null; signature: string } {
+  const entry = cache[segment.id];
+  if (!entry) return { cached: false, voice: null, signature: "" };
+  const speaker = speakers.find((s) => s.id === segment.speakerId);
+  if (!speaker) return { cached: false, voice: null, signature: "" };
+
+  if (supportsVoiceModes) {
+    const mode = effectiveMode(speaker);
+    if (mode === "clone") {
+      const voice = speaker.voice;
+      if (!voice) return { cached: false, voice: null, signature: "" };
+      const style = (speaker.voiceDesign ?? "").trim();
+      const signature = `${segment.text}::${voice}::clone::${style}::${effectiveQuality ?? ""}::${effectiveGenSig ?? ""}`;
+      return {
+        cached:
+          entry.text === segment.text &&
+          entry.voice === voice &&
+          entry.mode === "clone" &&
+          (entry.instruct ?? "") === style &&
+          entry.quality === effectiveQuality &&
+          entry.genSig === effectiveGenSig,
+        voice,
+        signature,
+      };
+    }
+    const design = mode === "design" ? (speaker.voiceDesign ?? "").trim() : "";
+    const signature = `${segment.text}::${mode}::${design}::${effectiveQuality ?? ""}::${effectiveGenSig ?? ""}`;
+    return {
+      cached:
+        entry.text === segment.text &&
+        entry.mode === mode &&
+        (entry.instruct ?? "") === design &&
+        entry.quality === effectiveQuality &&
+        entry.genSig === effectiveGenSig,
+      voice: null,
+      signature,
+    };
+  }
+
+  const voice = speaker.voice;
+  if (!voice) return { cached: false, voice: null, signature: "" };
+  // Qwen (supports_style_prompt) carries an always-available style with no
+  // voice mode; fold it so changing the style re-synthesizes. Empty for
+  // engines without it → identical to prior behavior.
+  const style = supportsStylePrompt ? (speaker.voiceDesign ?? "").trim() : "";
+  const signature = `${segment.text}::${voice}::${segment.speakerId ?? ""}::${effectiveQuality ?? ""}::${effectiveGenSig ?? ""}::${style}`;
+  return {
+    cached:
+      entry.text === segment.text &&
+      entry.voice === voice &&
+      entry.quality === effectiveQuality &&
+      entry.genSig === effectiveGenSig &&
+      (entry.instruct ?? "") === style,
+    voice,
+    signature,
+  };
+}
+
+export default function App() {
+  const project = useProject();
+  const { config, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig();
+  const {
+    voices,
+    loading: voicesLoading,
+    upload: uploadVoice,
+    remove: removeVoice,
+  } = useVoices();
+  const {
+    engines,
+    activeName: activeEngine,
+    setActive: setActiveEngine,
+    ensureLoaded: ensureEngineLoaded,
+    refresh: refreshEngines,
+  } = useEngine();
+  const activeEngineInfo = engines.find((e) => e.name === activeEngine) ?? null;
+  const supportsVoiceModes = activeEngineInfo?.supports_voice_modes ?? false;
+  const supportsStylePrompt = activeEngineInfo?.supports_style_prompt ?? false;
+  const supportsVoiceCloning = activeEngineInfo?.supports_voice_cloning ?? true;
+  const engineLanguages = activeEngineInfo?.languages ?? [];
+  // Kokoro is the only engine whose built-in voices are grouped by language, so
+  // its language dropdown FILTERS the voice list. Every other engine with
+  // languages (Chatterbox, Qwen) treats language as a synth parameter passed to
+  // the model — its voices are language-agnostic and must not be filtered.
+  const isFilterLangEngine = activeEngine === "kokoro";
+  const isSynthLangEngine = engineLanguages.length > 0 && !isFilterLangEngine;
+
+  // The sidebar's Backend panel (device/dtype/sample-rate) comes from
+  // /api/config, which reports the ACTIVE engine's runtime values. useConfig
+  // only fetches at mount, so refetch whenever the active engine changes to
+  // keep those values correct per engine.
+  useEffect(() => {
+    if (activeEngine) void refreshConfig();
+  }, [activeEngine, refreshConfig]);
+
+  const pm = useProjectMode();
+
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [cfgScale, setCfgScale] = useState<number>(1.3);
+  // Chatterbox Multilingual V3 only — voice expressiveness / dramatization.
+  // Ignored by VibeVoice and Kokoro. Range 0.0–1.0+ (clamped to 0–2 server-side).
+  const [exaggeration, setExaggeration] = useState<number>(0.5);
+  // VoxCPM only — diffusion quality (inference_timesteps). Ignored by other engines.
+  const [quality, setQuality] = useState<"fast" | "balanced" | "high">(() => {
+    const v = localStorage.getItem("vs.voxcpm.quality");
+    return v === "fast" || v === "balanced" || v === "high" ? v : "balanced";
+  });
+  const onQualityChange = (q: "fast" | "balanced" | "high") => {
+    setQuality(q);
+    localStorage.setItem("vs.voxcpm.quality", q);
+  };
+  // Qwen3-TTS CustomVoice only — advanced sampling params. Ignored by other engines.
+  const [qwenParams, setQwenParams] = useState<QwenParams>(() => {
+    try {
+      const raw = localStorage.getItem("vs.qwen.params");
+      if (raw) return { ...QWEN_DEFAULTS, ...JSON.parse(raw) };
+    } catch { /* ignore */ }
+    return QWEN_DEFAULTS;
+  });
+  const onQwenParamsChange = (p: QwenParams) => {
+    setQwenParams(p);
+    localStorage.setItem("vs.qwen.params", JSON.stringify(p));
+  };
+  const qwenSynthOpts =
+    activeEngine === "qwen"
+      ? {
+          temperature: qwenParams.temperature,
+          topP: qwenParams.topP,
+          topK: qwenParams.topK,
+          repetitionPenalty: qwenParams.repetitionPenalty,
+          seed: qwenParams.seed,
+        }
+      : {};
+  const qwenGenSig =
+    activeEngine === "qwen"
+      ? `t${qwenParams.temperature}|p${qwenParams.topP}|k${qwenParams.topK}|r${qwenParams.repetitionPenalty}|s${qwenParams.seed ?? ""}`
+      : undefined;
+  const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [isPlayingAll, setIsPlayingAll] = useState(false);
+  const [currentIndex, setCurrentIndex] = useState(-1);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState("");
+  const [stopExport, setStopExport] = useState(false);
+  const [toast, setToast] = useState<{ kind: "error" | "info"; text: string } | null>(null);
+  const [installEngine, setInstallEngine] = useState<string | null>(null);
+  const [downloadEngine, setDownloadEngine] = useState<string | null>(null);
+  // Full-page overlays + floating widget state.
+  const [fullscreenTab, setFullscreenTab] = useState<"control" | "recent" | null>(null);
+  const [monitorOpen, setMonitorOpen] = useState(false);
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  const [ttsHistory, setTtsHistory] = useState<TtsHistoryItem[]>(() => loadTtsHistory());
+  const { data: cacheData, busy: cacheBusy, refresh: cacheRefresh, onClear: onCacheClear, onDelete: onCacheDelete } = useCacheData();
+  // Whisper's status. Fetched up-front so the Transcribe language picker is
+  // populated before the weights lazily load on first transcription.
+  const { status: asrStatus, refresh: refreshAsrStatus } = useAsrStatus();
+  const { status: translateStatus, refresh: refreshTranslate } = useTranslateStatus();
+  const activeTranslatorModel =
+    translateStatus?.models.find((m) => m.name === translateStatus.active) ?? null;
+  const [deleteWeightsEngine, setDeleteWeightsEngine] = useState<string | null>(null);
+  const [uninstallEngine, setUninstallEngine] = useState<string | null>(null);
+
+  const playerRef = useRef<AudioPlayer>(new AudioPlayer());
+  const stopAllRef = useRef(false);
+
+  // Default the first speaker's voice to the first available voice once loaded
+  useEffect(() => {
+    if (voices.length > 0 && project.speakers[0] && !project.speakers[0].voice) {
+      project.setSpeakerVoice(project.speakers[0].id, voices[0]!.id);
+    }
+  }, [voices, project]);
+
+  // Apply theme to <html> so Tailwind dark: variants work
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Snap cfgScale to the active engine's default when the engine
+  // changes (or on first mount if the persisted last-engine wasn't
+  // VibeVoice). This keeps the slider visually centered in its new
+  // range — e.g. switching from VibeVoice (1.3 in a 0.5–5.0 range)
+  // to Chatterbox (default 0.5 in a 0.0–1.0 range) lands near the
+  // middle instead of pinned at the right edge.
+  useEffect(() => {
+    if (!activeEngine) return;
+    setCfgScale((current) => {
+      const target = getDefaultCfgForEngine(activeEngine);
+      // Only snap if the current value is way outside the new range —
+      // i.e. it was clearly tuned for a different engine. This way
+      // a deliberate user tweak on engine A still survives a quick
+      // toggle to engine B and back.
+      const otherEngines: Record<string, [number, number]> = {
+        vibevoice: [0.5, 5.0],
+        kokoro: [0.5, 5.0],
+        chatterbox: [0.0, 1.0],
+      };
+      const [, max] = otherEngines[activeEngine] ?? [0.5, 5.0];
+      // If current value is more than 10% beyond the new engine's max,
+      // snap. Otherwise leave it (the user already dialed something in).
+      return current > max * 1.1 ? target : current;
+    });
+  }, [activeEngine]);
+
+  useEffect(() => {
+    return () => {
+      playerRef.current.close();
+    };
+  }, []);
+
+  const showError = useCallback((err: unknown, fallback: string) => {
+    const text = err instanceof ApiError ? err.message : err instanceof Error ? err.message : fallback;
+    setToast({ kind: "error", text });
+  }, []);
+
+  // Filter the global voice catalog down to the active engine. The
+  // sidebar shouldn't offer Kokoro's voices when VibeVoice is active
+  // (and vice versa) — the backend will reject cross-engine requests
+  // anyway.
+  // Filter the global voice catalog down to voices the active engine can use.
+  // - Kokoro: only its own built-in voice catalog (no voice cloning).
+  // - VibeVoice and Chatterbox: both support voice cloning from arbitrary
+  //   reference audio, so filesystem voices (tagged engine="vibevoice"
+  //   by the registry) are usable by either. We show the same set of
+  //   voices when either voice-cloning engine is active.
+  // - If a future Chatterbox release ships a built-in voice catalog,
+  //   those voices (engine="chatterbox") will also appear here.
+  const displayedVoices = voices.filter((v) => {
+    if (!activeEngine) return true;
+    // Built-in-voice engines (Kokoro, Qwen) can't clone arbitrary reference
+    // clips — they expose ONLY their own curated catalog (tagged with the
+    // engine name). This is why Qwen shows its 9 designed voices rather than
+    // the filesystem reference clips used by the cloning engines.
+    if (!supportsVoiceCloning) {
+      if (v.engine !== activeEngine) return false;
+      // Kokoro groups its voices by language → filter by the chosen language.
+      // (Qwen's language is a synth param, not a voice group, so it isn't an
+      // isFilterLangEngine and all 9 voices stay visible.)
+      if (isFilterLangEngine && pm.tts.language) {
+        return v.language === pm.tts.language;
+      }
+      return true;
+    }
+    // Cloning engines (VibeVoice, Chatterbox, OmniVoice, VoxCPM) clone from
+    // filesystem/uploaded reference clips (tagged engine="vibevoice"; if
+    // Chatterbox ships built-ins later those appear too).
+    return v.engine === "vibevoice" || v.engine === "chatterbox";
+  });
+
+  // ---- generation ----
+
+  const generateFor = useCallback(
+    async (segmentId: string, options: { forceRegenerate?: boolean } = {}) => {
+      const seg = project.segments.find((s) => s.id === segmentId);
+      if (!seg || !seg.text.trim()) return;
+      const speaker = project.speakers.find((s) => s.id === seg.speakerId);
+      if (!speaker) {
+        showError("No speaker assigned to this segment.", "No speaker");
+        return;
+      }
+      const isOmni = supportsVoiceModes;
+      const mode = isOmni ? effectiveMode(speaker) : "clone";
+      // A reference voice is required except for design/auto modes.
+      if (mode === "clone" && !speaker.voice) {
+        showError("No voice assigned to the speaker. Pick one in the sidebar.", "No voice");
+        return;
+      }
+      const instruct =
+        mode === "design" || mode === "clone"
+          ? speaker.voiceDesign?.trim()
+            ? speaker.voiceDesign.trim()
+            : undefined
+          : undefined;
+      const speakers: SynthSpeaker[] = [
+        {
+          name: speaker.name,
+          voice: speaker.voice,
+          ...(isOmni ? { voice_mode: mode } : {}),
+          ...(instruct ? { instruct } : {}),
+        },
+      ];
+
+      setGeneratingId(segmentId);
+      try {
+        const isChatterbox = activeEngine === "chatterbox";
+        const { audioData, cacheHash } = await synthesizeWav(seg.text, speakers, cfgScale, {
+          forceRegenerate: options.forceRegenerate,
+          cfgWeight: isChatterbox ? cfgScale : null,
+          exaggeration: isChatterbox ? exaggeration : null,
+          ...(activeEngine === "voxcpm" ? { inferenceSteps: QUALITY_TIMESTEPS[quality] } : {}),
+          ...qwenSynthOpts,
+        });
+        project.cacheAudio(segmentId, {
+          audioData,
+          text: seg.text,
+          voice: speaker.voice,
+          ...(cacheHash ? { cacheHash } : {}),
+          ...(isOmni ? { mode } : {}),
+          ...(instruct ? { instruct } : {}),
+          quality: activeEngine === "voxcpm" ? quality : undefined,
+          genSig: qwenGenSig,
+        });
+      } catch (err: unknown) {
+        showError(err, "Synthesis failed");
+      } finally {
+        setGeneratingId(null);
+      }
+    },
+    [project, showError, cfgScale, exaggeration, activeEngine, quality, qwenParams],
+  );
+
+  // ---- playback ----
+
+  const playCached = useCallback(
+    async (segmentId: string) => {
+      const cached = project.audioCache[segmentId];
+      if (!cached) return;
+      const pcm = wavToPcm16(cached.audioData);
+      // Sample rate from cache; defaults to config's value.
+      const sr = config?.sampling_rate ?? 24000;
+      await playerRef.current.playPcm16(pcm, sr);
+    },
+    [project.audioCache, config],
+  );
+
+  const handlePlay = useCallback(
+    async (segmentId: string) => {
+      setPlayingId(segmentId);
+      try {
+        const seg = project.segments.find((s) => s.id === segmentId);
+        if (!seg) return;
+        const { cached } = isSegmentCached(seg, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine === "voxcpm" ? quality : undefined, qwenGenSig);
+        if (!cached) {
+          await generateFor(segmentId);
+        }
+        await playCached(segmentId);
+      } catch (err) {
+        showError(err, "Playback failed");
+      } finally {
+        setPlayingId((id) => (id === segmentId ? null : id));
+      }
+    },
+    [project, generateFor, playCached, showError, activeEngine, supportsVoiceModes, supportsStylePrompt, quality, qwenGenSig],
+  );
+
+  const handleStop = useCallback(() => {
+    playerRef.current.stop();
+    setPlayingId(null);
+  }, []);
+
+  const handleDownloadSegment = useCallback(
+    (segmentId: string) => {
+      const cached = project.audioCache[segmentId];
+      if (!cached || cached.audioData.byteLength === 0) return;
+      const blob = new Blob([cached.audioData], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vibevoice-segment-${segmentId.slice(0, 8)}.wav`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    [project.audioCache],
+  );
+
+  const handleUpdateVoiceMeta = useCallback(
+    async (voiceId: string, meta: VoiceMetadata) => {
+      try {
+        await updateVoiceMeta(voiceId, meta);
+        window.location.reload();
+      } catch (err) {
+        showError(err, "Failed to update voice");
+      }
+    },
+    [showError],
+  );
+
+  const handlePlayAll = useCallback(async () => {
+    setIsPlayingAll(true);
+    stopAllRef.current = false;
+    try {
+      for (let i = 0; i < project.segments.length; i++) {
+        if (stopAllRef.current) break;
+        const seg = project.segments[i]!;
+        if (!seg.text.trim()) continue;
+        setCurrentIndex(i);
+        setPlayingId(seg.id);
+        try {
+          const { cached } = isSegmentCached(seg, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine === "voxcpm" ? quality : undefined, qwenGenSig);
+          if (!cached) {
+            setGeneratingId(seg.id);
+            try {
+              await generateFor(seg.id);
+            } finally {
+              setGeneratingId(null);
+            }
+          }
+          await playCached(seg.id);
+        } catch (err) {
+          showError(err, "Playback failed");
+        }
+      }
+    } finally {
+      setIsPlayingAll(false);
+      setCurrentIndex(-1);
+      setPlayingId(null);
+    }
+  }, [project, generateFor, playCached, showError, activeEngine, supportsVoiceModes, supportsStylePrompt, quality, qwenGenSig]);
+
+  const handleStopAll = useCallback(() => {
+    stopAllRef.current = true;
+    playerRef.current.stop();
+    setIsPlayingAll(false);
+    setCurrentIndex(-1);
+    setPlayingId(null);
+  }, []);
+
+  // ---- generation all ----
+
+  const handleGenerateAll = useCallback(async () => {
+    // Iterate per-segment so each segment's cache is populated with audio
+    // that matches its own text+voice signature. This is N round-trips to
+    // the model (slower than a single combined call) but it keeps the
+    // cache consistent: per-segment Play won't re-generate.
+    const valid = project.segments.filter((s) => s.text.trim());
+    if (valid.length === 0) return;
+
+    // Pre-check that all speakers are configured
+    const speakersUsed = new Set<string>();
+    for (const seg of valid) {
+      if (!seg.speakerId) {
+        showError("Some segments have no speaker assigned.", "Missing speaker");
+        return;
+      }
+      const sp = project.speakers.find((s) => s.id === seg.speakerId);
+      if (!sp) {
+        showError("Some segments have no speaker assigned.", "Missing speaker");
+        return;
+      }
+      const spMode = supportsVoiceModes ? effectiveMode(sp) : "clone";
+      if (spMode === "clone" && !sp.voice) {
+        showError(
+          "Some segments have no voice. Assign voices in the sidebar first.",
+          "Missing voice",
+        );
+        return;
+      }
+      if (sp.voice) speakersUsed.add(sp.voice);  // design/auto carry no voice
+    }
+    if (speakersUsed.size > 4) {
+      showError(
+        `This project uses ${speakersUsed.size} distinct voices; the 1.5B model supports up to 4.`,
+        "Too many speakers",
+      );
+      return;
+    }
+
+    setIsExporting(true);
+    setExportProgress("Starting…");
+    try {
+      for (let i = 0; i < valid.length; i++) {
+        const seg = valid[i]!;
+        // Skip already-cached segments
+        const { cached } = isSegmentCached(seg, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine === "voxcpm" ? quality : undefined, qwenGenSig);
+        if (cached) continue;
+
+        setExportProgress(`Segment ${i + 1}/${valid.length}`);
+        setGeneratingId(seg.id);
+        try {
+          await generateFor(seg.id);
+        } finally {
+          setGeneratingId(null);
+        }
+      }
+    } catch (err: unknown) {
+      showError(err, "Generate-all failed");
+    } finally {
+      setIsExporting(false);
+      setExportProgress("");
+    }
+  }, [project, generateFor, showError, activeEngine, supportsVoiceModes, supportsStylePrompt, quality, qwenGenSig]);
+
+  // ---- TTS mode generation ----
+
+  const generateTts = useCallback(async () => {
+    if (!pm.tts.text.trim()) return;
+    const isOmni = supportsVoiceModes;
+    const voice = displayedVoices.find((v) => v.id === pm.tts.voiceId) ?? null;
+    const mode: OmniMode = isOmni
+      ? effectiveMode({ voice: pm.tts.voiceId ?? "", omnivoiceMode: pm.tts.omnivoiceMode })
+      : "clone";
+    // A reference voice is required except for design/auto modes.
+    if (mode === "clone" && !voice) {
+      showError("Select a voice in the library first.", "No voice");
+      return;
+    }
+    const instruct =
+      mode === "design" || mode === "clone"
+        ? pm.tts.voiceDesign?.trim()
+          ? pm.tts.voiceDesign.trim()
+          : undefined
+        : undefined;
+    setGeneratingId(TTS_SEG_ID);
+    try {
+      const isChatterbox = activeEngine === "chatterbox";
+      const speakers: SynthSpeaker[] = [{
+        name: "Voice",
+        voice: voice?.id ?? "",
+        ...(isOmni ? { voice_mode: mode } : {}),
+        ...(instruct ? { instruct } : {}),
+      }];
+      const { audioData, cacheHash } = await synthesizeWav(pm.tts.text, speakers, cfgScale, {
+        cfgWeight: isChatterbox ? cfgScale : null,
+        exaggeration: isChatterbox ? exaggeration : null,
+        languageId: isSynthLangEngine ? (pm.tts.language ?? undefined) : undefined,
+        ...(activeEngine === "voxcpm" ? { inferenceSteps: QUALITY_TIMESTEPS[quality] } : {}),
+        ...qwenSynthOpts,
+      });
+      project.cacheAudio(TTS_SEG_ID, {
+        audioData,
+        text: pm.tts.text,
+        voice: voice?.id ?? "",
+        ...(cacheHash ? { cacheHash } : {}),
+        ...(isOmni ? { mode } : {}),
+        ...(instruct ? { instruct } : {}),
+        quality: activeEngine === "voxcpm" ? quality : undefined,
+        genSig: qwenGenSig,
+      });
+      setTtsHistory(addTtsText(pm.tts.text));
+    } catch (err) { showError(err, "Synthesis failed"); }
+    finally { setGeneratingId(null); }
+  }, [pm.tts, displayedVoices, activeEngine, cfgScale, exaggeration, isSynthLangEngine, project, showError, quality, qwenParams]);
+
+  // Save the take the browser already holds. Deliberately does NOT go through
+  // the server cache: the audio is in hand after generate, so Download works
+  // even if the request missed the cache.
+  const downloadTts = useCallback(() => {
+    const cached = project.audioCache[TTS_SEG_ID];
+    if (!cached) {
+      showError("Generate the audio first", "Nothing to download");
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([cached.audioData], { type: "audio/wav" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `voice-studio-${Date.now()}.wav`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [project.audioCache, showError]);
+
+  const playTts = useCallback(async () => {
+    // Toggle: if the TTS clip is already playing, this acts as Stop.
+    if (playingId === TTS_SEG_ID) {
+      handleStop();
+      return;
+    }
+    // Stop any other in-flight playback so clips never overlap.
+    playerRef.current.stop();
+    if (!project.audioCache[TTS_SEG_ID]) {
+      await generateTts();
+    }
+    setPlayingId(TTS_SEG_ID);
+    try {
+      await playCached(TTS_SEG_ID);
+    } catch (err) {
+      showError(err, "Playback failed");
+    } finally {
+      // Clear only if this clip is still the active one (a newer action may
+      // have taken over).
+      setPlayingId((id) => (id === TTS_SEG_ID ? null : id));
+    }
+  }, [playingId, project.audioCache, generateTts, playCached, handleStop, showError]);
+
+  // ---- import / export json ----
+
+  const handleExportJson = useCallback(() => {
+    const data = project.exportProject();
+    const speakers = project.speakers;
+    const blob = new Blob(
+      [JSON.stringify({ project: data, speakers }, null, 2)],
+      { type: "application/json" },
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vibevoice-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [project]);
+
+  const handleImportJson = useCallback(
+    async (file: File) => {
+      const text = await file.text();
+      try {
+        const data = JSON.parse(text) as {
+          project?: Project;
+          speakers?: Speaker[];
+        };
+        const proj = data.project ?? (data as unknown as Project);
+        const speakers = data.speakers ?? project.speakers;
+        project.loadProject(proj, speakers);
+      } catch (err) {
+        showError(err, "Invalid project file");
+      }
+    },
+    [project, showError],
+  );
+
+  const handleLoadSample = useCallback(
+    (sample: Sample) => {
+      const { segments, speakers } = loadSample(sample);
+      project.loadProject(
+        { segments, createdAt: new Date().toISOString(), version: "1.0.0" },
+        speakers,
+      );
+    },
+    [project],
+  );
+
+  const handleLoadTtsSample = useCallback(
+    (s: TtsSample) => {
+      const { text, voiceId, voiceDesign, omniMode } = loadTtsSample(s);
+      pm.setTtsText(text);
+      // Use the suggested voice only if it exists in the current engine's voice list.
+      if (voiceId && displayedVoices.some((v) => v.id === voiceId)) pm.setTtsVoice(voiceId);
+      if (voiceDesign !== null) pm.setTtsVoiceDesign(voiceDesign);
+      if (omniMode !== null) pm.setTtsOmniMode(omniMode);
+    },
+    [pm, displayedVoices],
+  );
+
+  // ---- export audio ----
+
+  // Shared by the WAV export and the subtitle export: both need the same
+  // per-segment request list. Returns null (after surfacing an error) when the
+  // project isn't exportable.
+  const buildPodcastPayload = useCallback(() => {
+    const valid = project.segments.filter((s) => s.text.trim());
+    if (valid.length === 0) {
+      showError("No segments with text", "Nothing to export");
+      return null;
+    }
+    const payload: {
+      text: string;
+      voice: string;
+      cfg_scale?: number;
+      cache_hash?: string;
+      cfg_weight?: number;
+      exaggeration?: number;
+      language_id?: string;
+      voice_mode?: "clone" | "design" | "auto";
+      instruct?: string;
+      inference_steps?: number;
+      temperature?: number;
+      top_p?: number;
+      top_k?: number;
+      repetition_penalty?: number;
+      seed?: number;
+    }[] = [];
+    const isChatterbox = activeEngine === "chatterbox";
+    const isOmni = supportsVoiceModes;
+    for (const seg of valid) {
+      const speaker = project.speakers.find((s) => s.id === seg.speakerId);
+      if (!speaker) {
+        showError(
+          `Segment has no speaker assigned (text: "${seg.text.slice(0, 40)}…").`,
+          "Missing speaker",
+        );
+        return null;
+      }
+      const mode = isOmni ? effectiveMode(speaker) : "clone";
+      if (mode === "clone" && !speaker.voice) {
+        showError(
+          `Segment has no voice assigned (text: "${seg.text.slice(0, 40)}…").`,
+          "Missing voice",
+        );
+        return null;
+      }
+      const instruct =
+        mode === "design" || mode === "clone"
+          ? speaker.voiceDesign?.trim()
+            ? speaker.voiceDesign.trim()
+            : undefined
+          : undefined;
+      // Pass the per-segment cache hash so the backend can detect when a
+      // segment was regenerated and avoid serving a stale joined WAV.
+      const cached = project.audioCache[seg.id];
+      const cache_hash = cached?.cacheHash || undefined;
+      payload.push({
+        text: seg.text,
+        voice: speaker.voice,
+        cfg_scale: cfgScale,
+        ...(cache_hash ? { cache_hash } : {}),
+        ...(isChatterbox && cfgScale != null ? { cfg_weight: cfgScale } : {}),
+        ...(isChatterbox ? { exaggeration } : {}),
+        ...(isOmni ? { voice_mode: mode } : {}),
+        ...(instruct ? { instruct } : {}),
+        ...(activeEngine === "voxcpm" ? { inference_steps: QUALITY_TIMESTEPS[quality] } : {}),
+        ...(activeEngine === "qwen" ? {
+          temperature: qwenParams.temperature,
+          top_p: qwenParams.topP,
+          top_k: qwenParams.topK,
+          repetition_penalty: qwenParams.repetitionPenalty,
+          ...(qwenParams.seed != null ? { seed: qwenParams.seed } : {}),
+        } : {}),
+      });
+    }
+    return payload;
+  }, [project, showError, cfgScale, exaggeration, activeEngine, supportsVoiceModes, quality, qwenParams]);
+
+  const handleExportAudio = useCallback(async () => {
+    const payload = buildPodcastPayload();
+    if (!payload) return;
+
+    setIsExporting(true);
+    setStopExport(false);
+    setExportProgress("Preparing…");
+    try {
+      const { audioData, cacheHit, cacheHash } = await downloadPodcast(payload, 150);
+      if (stopExport) return;
+      setExportProgress(cacheHit ? "Using cached download" : "Encoding WAV…");
+      const blob = new Blob([audioData], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vibevoice-podcast-${Date.now()}.wav`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportProgress(
+        cacheHit
+          ? `Done (cache hit · ${cacheHash?.slice(0, 12)}…)`
+          : "Done",
+      );
+    } catch (err) {
+      showError(err, "Download failed");
+    } finally {
+      setIsExporting(false);
+      setExportProgress("");
+    }
+  }, [buildPodcastPayload, showError, stopExport]);
+
+  // Subtitles for generated audio: transcribe the rendered WAV (the joined
+  // podcast, or the single TTS take) and format the segments as SubRip.
+  const handleExportSubtitles = useCallback(async () => {
+    setIsExporting(true);
+    setExportProgress("Preparing audio…");
+    try {
+      let wav: ArrayBuffer;
+      if (pm.mode === "tts") {
+        const cached = project.audioCache[TTS_SEG_ID];
+        if (!cached) {
+          showError("Generate the audio first", "Nothing to transcribe");
+          return;
+        }
+        wav = cached.audioData;
+      } else {
+        const payload = buildPodcastPayload();
+        if (!payload) return;
+        setExportProgress("Rendering podcast…");
+        wav = (await downloadPodcast(payload, 150)).audioData;
+      }
+
+      setExportProgress("Transcribing…");
+      const file = new File([wav], "audio.wav", { type: "audio/wav" });
+      const res = await transcribe({ file, timestamps: true });
+      if (res.segments.length === 0) {
+        showError("Whisper returned no timestamped segments", "No subtitles");
+        return;
+      }
+
+      const blob = new Blob([segmentsToSrt(res.segments)], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `voice-studio-${Date.now()}.srt`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportProgress("Done");
+    } catch (err) {
+      showError(err, "Subtitle export failed");
+    } finally {
+      setIsExporting(false);
+      setExportProgress("");
+    }
+  }, [pm.mode, project.audioCache, buildPodcastPayload, showError]);
+
+  const viewportWidth = useViewportWidth();
+
+  // ---- derived state ----
+
+  const isDark = theme === "dark";
+  const validCount = project.segments.filter((s) => s.text.trim()).length;
+  const cachedCount = useMemo(
+    () =>
+      project.segments.filter((s) => {
+        const { cached } = isSegmentCached(s, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine === "voxcpm" ? quality : undefined, qwenGenSig);
+        return cached;
+      }).length,
+    [project.segments, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine, quality, qwenGenSig],
+  );
+  const busy = isPlayingAll || isExporting || generatingId !== null;
+
+  // ---- loading state ----
+
+  if (configLoading || voicesLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <div className="flex items-center gap-3 text-zinc-300">
+          <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
+          Loading SpeechLab backend…
+        </div>
+      </div>
+    );
+  }
+
+  if (configError) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6">
+        <div className="max-w-md text-center">
+          <h1 className="text-xl font-semibold text-white mb-2">Backend not reachable</h1>
+          <p className="text-sm text-zinc-400 mb-4">
+            Could not reach <code className="text-indigo-300">/api/config</code>: {configError}
+          </p>
+          <p className="text-xs text-zinc-400">
+            Start the backend in another terminal:
+            <br />
+            <code className="text-zinc-300">cd backend &amp;&amp; python cli.py --device cpu</code>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ConfirmProvider isDark={isDark}>
+    <div
+      className={`flex h-screen flex-col overflow-hidden ${isDark ? "bg-zinc-950" : "bg-gray-100"}`}
+      style={{
+        backgroundImage: isDark
+          ? "radial-gradient(ellipse 70% 45% at 50% -15%, rgba(255,140,0,0.10) 0%, rgba(255,94,58,0.04) 45%, transparent 75%)"
+          : undefined,
+      }}
+    >
+      {/* Top header — mode nav, backend status, appearance, widget/overlay toggles */}
+      <TopBar
+        isDark={isDark}
+        onThemeToggle={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        mode={pm.mode}
+        onModeChange={pm.setMode}
+        engine={activeEngine}
+        engineLabel={activeEngineInfo?.display_name ?? activeEngine}
+        device={config?.device ?? null}
+        loaded={activeEngineInfo?.loaded ?? false}
+        onOpenControls={() => setFullscreenTab("control")}
+        onOpenRecent={() => setFullscreenTab("recent")}
+        monitorOpen={monitorOpen}
+        onToggleMonitor={setMonitorOpen}
+        onOpenCredits={() => setCreditsOpen(true)}
+        version={config?.version}
+        voices={displayedVoices}
+        onUploadVoice={uploadVoice}
+        onRemoveVoice={removeVoice}
+        onUpdateVoiceMeta={handleUpdateVoiceMeta}
+        supportsVoiceCloning={supportsVoiceCloning}
+        selectedVoiceId={
+          pm.mode === "tts" ? pm.tts.voiceId : pm.mode === "dub" ? pm.dub.voiceId : undefined
+        }
+        onSelectVoice={
+          pm.mode === "tts" ? pm.setTtsVoice : pm.mode === "dub" ? pm.setDubVoice : undefined
+        }
+        asr={asrStatus}
+        transcribeBuffer={pm.mode === "transcribe" ? pm.transcribe : null}
+        onTranscribeChange={pm.setTranscribe}
+        onActivateAsrModel={activateAsrModel}
+        onRefreshAsr={refreshAsrStatus}
+      />
+
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+      {/* MIDDLE column: sticky toolbar, scroll body, sticky player */}
+      <main className="flex-1 flex flex-col min-w-0 @container">
+        {showNarrowBanner(viewportWidth) && <TooNarrowBanner isDark={isDark} />}
+        <MiddleToolbar
+          validCount={validCount}
+          cachedCount={cachedCount}
+          busy={busy}
+          isDark={isDark}
+          mode={pm.mode}
+          onAddSegment={project.addSegment}
+          onGenerateAll={handleGenerateAll}
+          onExportJson={handleExportJson}
+          onImportJson={handleImportJson}
+          onLoadPodcastSample={handleLoadSample}
+          onLoadTtsSample={handleLoadTtsSample}
+          onExportSubtitles={() => void handleExportSubtitles()}
+          subtitlesDisabled={
+            pm.mode === "tts" ? !project.audioCache[TTS_SEG_ID] : cachedCount === 0
+          }
+        />
+
+        {pm.mode === null ? (
+          <ModeChooser isDark={isDark} onPick={pm.setMode} />
+        ) : pm.mode === "transcribe" ? (
+          <TranscribeEditor
+            isDark={isDark}
+            buffer={pm.transcribe}
+            onChange={pm.setTranscribe}
+            asr={asrStatus}
+            translateLanguages={activeTranslatorModel?.languages ?? []}
+            activeTranslator={translateStatus?.active ?? "m2m100"}
+            translatorDownloaded={activeTranslatorModel?.downloaded ?? false}
+            onDownloadWeights={(n) => setDownloadEngine(n)}
+            onSendToTts={(text) => {
+              pm.setTtsText(text);
+              pm.setMode("tts");
+            }}
+          />
+        ) : pm.mode === "dub" ? (
+          <DubEditor
+            isDark={isDark}
+            buffer={pm.dub}
+            onChange={pm.setDub}
+            asr={asrStatus}
+            activeVoice={displayedVoices.find((v) => v.id === pm.dub.voiceId) ?? null}
+            activeEngine={activeEngine}
+            supportsVoiceModes={supportsVoiceModes}
+            supportsStyleClone={activeEngineInfo?.supports_style_clone ?? false}
+            supportsStylePrompt={supportsStylePrompt}
+            translateLanguages={activeTranslatorModel?.languages ?? []}
+            activeTranslator={translateStatus?.active ?? "m2m100"}
+            translatorDownloaded={activeTranslatorModel?.downloaded ?? false}
+            onDownloadWeights={(n) => setDownloadEngine(n)}
+          />
+        ) : pm.mode === "tts" ? (
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            {toast && (
+              <div
+                className={`mb-6 p-3 rounded-lg border text-sm ${
+                  toast.kind === "error"
+                    ? isDark
+                      ? "bg-red-900/30 border-red-600/40 text-red-200"
+                      : "bg-red-50 border-red-200 text-red-700"
+                    : isDark
+                      ? "bg-zinc-800 border-zinc-700 text-zinc-200"
+                      : "bg-amber-50 border-amber-200 text-amber-800"
+                }`}
+              >
+                {toast.text}
+              </div>
+            )}
+            <TtsEditor
+              isDark={isDark}
+              text={pm.tts.text}
+              onTextChange={pm.setTtsText}
+              activeVoice={displayedVoices.find((v) => v.id === pm.tts.voiceId) ?? null}
+              languages={engineLanguages}
+              showLanguage={engineLanguages.length > 0}
+              language={pm.tts.language}
+              onLanguageChange={pm.setTtsLanguage}
+              supportsVoiceModes={supportsVoiceModes}
+              supportsStyleClone={activeEngineInfo?.supports_style_clone ?? false}
+              supportsStylePrompt={supportsStylePrompt}
+              activeEngine={activeEngine}
+              omniMode={effectiveMode({ voice: pm.tts.voiceId ?? "", omnivoiceMode: pm.tts.omnivoiceMode })}
+              onOmniModeChange={pm.setTtsOmniMode}
+              voiceDesign={pm.tts.voiceDesign ?? ""}
+              onVoiceDesignChange={pm.setTtsVoiceDesign}
+              busy={busy}
+              isGenerating={generatingId === TTS_SEG_ID}
+              isPlaying={playingId === TTS_SEG_ID}
+              hasAudio={!!project.audioCache[TTS_SEG_ID]}
+              onGenerate={() => void generateTts()}
+              onPlay={() => void playTts()}
+              onDownload={downloadTts}
+              history={ttsHistory}
+              onUseText={(t) => pm.setTtsText(t)}
+              onClearHistory={() => {
+                clearTtsHistory();
+                setTtsHistory([]);
+              }}
+            />
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <div className="max-w-5xl mx-auto">
+              {isExporting && (
+                <div className="mb-6 p-4 bg-indigo-900/30 rounded-xl border border-indigo-600/30 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
+                    <div>
+                      <p className="text-white font-medium">Exporting audio</p>
+                      <p className="text-indigo-300 text-sm">{exportProgress}</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStopExport(true)}
+                    className={`px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg font-medium ${focusRing}`}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {toast && (
+                <div
+                  className={`mb-6 p-3 rounded-lg border text-sm ${
+                    toast.kind === "error"
+                      ? isDark
+                        ? "bg-red-900/30 border-red-600/40 text-red-200"
+                        : "bg-red-50 border-red-200 text-red-700"
+                      : isDark
+                        ? "bg-zinc-800 border-zinc-700 text-zinc-200"
+                        : "bg-amber-50 border-amber-200 text-amber-800"
+                  }`}
+                >
+                  {toast.text}
+                </div>
+              )}
+
+              <div className="mb-4">
+                <SpeakerRoster
+                  speakers={project.speakers}
+                  voices={displayedVoices}
+                  isDark={isDark}
+                  activeEngine={activeEngine}
+                  supportsVoiceModes={activeEngineInfo?.supports_voice_modes ?? false}
+                  supportsStyleClone={activeEngineInfo?.supports_style_clone ?? false}
+                  supportsStylePrompt={supportsStylePrompt}
+                  onAddSpeaker={project.addSpeaker}
+                  onUpdateSpeaker={project.updateSpeaker}
+                  onRemoveSpeaker={project.removeSpeaker}
+                  onSetSpeakerVoice={project.setSpeakerVoice}
+                />
+              </div>
+
+              <div className="space-y-4">
+                {project.segments.map((segment, index) => {
+                  const { cached } = isSegmentCached(segment, project.audioCache, project.speakers, supportsVoiceModes, supportsStylePrompt, activeEngine === "voxcpm" ? quality : undefined, qwenGenSig);
+                  return (
+                    <SegmentCard
+                      key={segment.id}
+                      segment={segment}
+                      index={index}
+                      speakers={project.speakers}
+                      busy={busy}
+                      isPlaying={playingId === segment.id}
+                      isGenerating={generatingId === segment.id}
+                      isCached={cached}
+                      canDelete={project.segments.length > 1}
+                      theme={theme}
+                      speakerColor={project.speakerColor}
+                      onUpdate={project.updateSegment}
+                      onRemove={project.removeSegment}
+                      onGenerate={() => generateFor(segment.id)}
+                      onRegenerate={() => generateFor(segment.id, { forceRegenerate: true })}
+                      onPlay={() => handlePlay(segment.id)}
+                      onStop={handleStop}
+                      onDownload={() => handleDownloadSegment(segment.id)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pm.mode === "podcast" && (
+          <InlinePlayer
+            segmentCount={project.segments.length}
+            validCount={validCount}
+            cachedCount={cachedCount}
+            isPlayingAll={isPlayingAll}
+            currentIndex={currentIndex}
+            isExporting={isExporting}
+            isDark={isDark}
+            onPlayAll={handlePlayAll}
+            onStopAll={handleStopAll}
+            onExportAudio={handleExportAudio}
+          />
+        )}
+
+        <BrandFooter isDark={isDark} />
+      </main>
+      </div>
+
+      <SynthProgressPanel isDark={isDark} enabled={busy} engine={activeEngine} />
+
+      <SystemMonitorWidget
+        isDark={isDark}
+        open={monitorOpen}
+        onToggle={setMonitorOpen}
+      />
+
+      {fullscreenTab && (
+        <FullScreenPage
+          isDark={isDark}
+          engines={engines}
+          asr={asrStatus}
+          translate={translateStatus}
+          onActivateTranslator={async (name) => {
+            try {
+              await activateTranslator(name);
+              await refreshTranslate();
+            } catch (err) {
+              showError(err, "Translation model switch failed");
+            }
+          }}
+          activeEngine={activeEngine}
+          onSelectEngine={async (name) => {
+            try {
+              await setActiveEngine(name);
+            } catch (err) {
+              showError(err, "Engine switch failed");
+            }
+          }}
+          onLoadEngine={async (name) => {
+            try {
+              await ensureEngineLoaded(name);
+            } catch (err) {
+              showError(err, "Engine load failed");
+            }
+          }}
+          onInstallEngine={(name) => setInstallEngine(name)}
+          onDownloadEngine={(name) => setDownloadEngine(name)}
+          onDeleteWeights={(name) => setDeleteWeightsEngine(name)}
+          onUninstallEngine={(name) => setUninstallEngine(name)}
+          cfgScale={cfgScale}
+          onCfgScaleChange={setCfgScale}
+          exaggeration={exaggeration}
+          onExaggerationChange={setExaggeration}
+          quality={quality}
+          onQualityChange={onQualityChange}
+          qwenParams={qwenParams}
+          onQwenParamsChange={onQwenParamsChange}
+          qwenDefaults={QWEN_DEFAULTS}
+          voxcpmModelPath={config?.voxcpm_model_path ?? null}
+          onRefreshConfig={refreshConfig}
+          cacheData={cacheData}
+          cacheBusy={cacheBusy}
+          onCacheClear={onCacheClear}
+          onCacheDelete={onCacheDelete}
+          onCacheRefresh={() => void cacheRefresh()}
+          tab={fullscreenTab}
+          onTabChange={setFullscreenTab}
+          onClose={() => setFullscreenTab(null)}
+        />
+      )}
+
+      {creditsOpen && <CreditsDialog isDark={isDark} onClose={() => setCreditsOpen(false)} />}
+
+      {installEngine && (
+        <InstallEngineDialog
+          isDark={isDark}
+          engineName={installEngine}
+          displayName={
+            engines.find((e) => e.name === installEngine)?.display_name ?? installEngine
+          }
+          onClose={() => setInstallEngine(null)}
+          onInstalled={() => {
+            void refreshEngines();
+          }}
+        />
+      )}
+      {downloadEngine && (
+        <DownloadModelDialog
+          isDark={isDark}
+          engineName={downloadEngine}
+          displayName={
+            engines.find((e) => e.name === downloadEngine)?.display_name ??
+            translateStatus?.models.find((m) => m.name === downloadEngine)?.display_name ??
+            (downloadEngine === "whisper" ? "Whisper large-v3-turbo (ASR)" : downloadEngine)
+          }
+          onClose={() => setDownloadEngine(null)}
+          onDone={async () => {
+            const name = downloadEngine;
+            // Whisper is ASR, not a TTS engine: it isn't in the engine registry,
+            // so activating/loading it as one would fail. Just refresh its status
+            // to clear the Transcribe download gate.
+            if (name === "whisper") {
+              await refreshAsrStatus();
+              setDownloadEngine(null);
+              return;
+            }
+            // Translation models are also outside the engine registry.
+            if (translateStatus?.models.some((m) => m.name === name)) {
+              await refreshTranslate();
+              setDownloadEngine(null);
+              return;
+            }
+            await refreshEngines();
+            try {
+              await setActiveEngine(name);
+              await ensureEngineLoaded(name);
+            } catch (err) {
+              showError(err, "Engine load failed");
+            }
+            setDownloadEngine(null);
+          }}
+        />
+      )}
+      {deleteWeightsEngine && (
+        <DeleteWeightsDialog
+          isDark={isDark}
+          engineName={deleteWeightsEngine}
+          displayName={
+            engines.find((e) => e.name === deleteWeightsEngine)?.display_name ??
+            translateStatus?.models.find((m) => m.name === deleteWeightsEngine)?.display_name ??
+            (deleteWeightsEngine === "whisper" ? asrStatus?.display_name : null) ??
+            deleteWeightsEngine
+          }
+          onClose={() => setDeleteWeightsEngine(null)}
+          onDone={async () => {
+            // Whisper (ASR) and the translation models are outside the engine
+            // registry: refresh their own status so the card flips back to
+            // "Download" instead of trying to reload a non-existent TTS engine.
+            if (deleteWeightsEngine === "whisper") await refreshAsrStatus();
+            else if (translateStatus?.models.some((m) => m.name === deleteWeightsEngine)) await refreshTranslate();
+            else await refreshEngines();
+            setDeleteWeightsEngine(null);
+          }}
+        />
+      )}
+      {uninstallEngine && (
+        <UninstallEngineDialog
+          isDark={isDark}
+          engineName={uninstallEngine}
+          displayName={
+            engines.find((e) => e.name === uninstallEngine)?.display_name ??
+            uninstallEngine
+          }
+          onClose={() => setUninstallEngine(null)}
+          onUninstalled={async () => {
+            await refreshEngines();
+            setUninstallEngine(null);
+          }}
+        />
+      )}
+    </div>
+    </ConfirmProvider>
+  );
+}

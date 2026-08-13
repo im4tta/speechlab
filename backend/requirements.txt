@@ -1,0 +1,90 @@
+# Core TTS — the `vibevoice` Python package from the community fork
+# provides VibeVoiceForConditionalGenerationInference and VibeVoiceProcessor.
+# (Microsoft's official VibeVoice repo was removed in Sept 2025.)
+vibevoice @ git+https://github.com/vibevoice-community/VibeVoice.git
+
+# Pinned versions to match the vibevoice package's own pin (pyproject.toml).
+# Newer transformers versions (5.x) drop the modeling API this code uses.
+transformers==4.51.3
+
+# torch: install with CUDA wheels on Windows:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+torch>=2.4.0
+torchaudio>=2.4.0
+accelerate==1.6.0
+peft
+datasets==3.5.0
+diffusers
+numba>=0.57.0
+llvmlite>=0.40.0
+librosa
+ml-collections
+absl-py
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# Audio I/O
+soundfile>=0.12.1
+numpy>=1.26,<3.0
+scipy>=1.11
+
+# Config & validation
+pydantic>=2.7.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.1
+
+# System metrics for the hardware status bar (CPU/RAM/disk).
+psutil>=5.9
+
+# Device-wide VRAM for the status bar. torch.cuda.mem_get_info() under-reports
+# on Windows/WDDM (it cannot see other processes' allocations); NVML is what
+# nvidia-smi itself queries. Pure-python binding, optional at runtime.
+nvidia-ml-py>=12.535
+
+# Kokoro TTS engine (optional but recommended). Requires `espeak-ng`
+# installed on the system PATH — see README for the platform install
+# command. Models: https://huggingface.co/hexgrad/Kokoro-82M
+kokoro>=0.9.4
+misaki[en]>=0.9.4
+
+# Kitten TTS Mini — ultra-light ONNX TTS (runs on CPU, no torch/transformers).
+# Shares Kokoro's misaki/espeak deps; the only new dep is onnxruntime. The
+# package is a GitHub release wheel (not on PyPI). Models:
+# https://huggingface.co/KittenML/kitten-tts-mini-0.8
+onnxruntime>=1.20
+kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8/kittentts-0.8.0-py3-none-any.whl
+
+# Translation (in-process, main venv): M2M-100 418M (facebook/m2m100_418M, MIT)
+# and MADLAD-400 3B (google/madlad400-3b-mt, Apache-2.0). Both are transformers
+# seq2seq models; their tokenizers need sentencepiece. hf_xet is required to
+# download these Xet-backed repos (without it the weights fetch silently fails).
+sentencepiece>=0.1.99
+hf_xet>=1.0
+
+# Argos Translate — offline, in-process translator (the engine LibreTranslate
+# wraps). Pulls ctranslate2 + stanza + sacremoses; language packs install on
+# demand. No isolated venv (verified conflict-free with the main venv).
+argostranslate>=1.9
+
+# Khmer ASR post-processing (spell correction + word segmentation), ported from
+# the KhmerScribe tool. khmer-nltk = CRF word tokenizer; khmerpronounce = G2P.
+# Both degrade gracefully (regex fallback / null phoneme map) if absent.
+khmer-nltk>=1.6
+khmerpronounce>=0.0.1
+
+# YouTube scribe (transcript extraction + ASR fallback) — ported from the
+# KhmerScribe tool. yt-dlp + ffmpeg are required at runtime for the audio path.
+youtube-transcript-api>=1.0
+
+# Chatterbox Multilingual V3 is NOT installed here. It hard-pins
+# transformers==5.2.0, which conflicts with vibevoice's transformers==4.51.3.
+# It installs into a separate environment (backend/venv-chatterbox) and runs
+# as a subprocess worker. Install it with:  python studio.py models
+# (select Chatterbox). See backend/requirements-chatterbox.txt.
+
+# Optional: flash-attn for faster inference on supported GPUs (Ampere+).
+# Skipped by default; install manually if you have CUDA 11.8/12.x and want it.
+# pip install flash-attn --no-build-isolation

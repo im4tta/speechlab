@@ -1,0 +1,657 @@
+// Typed wrappers for the backend's REST API.
+
+import type {
+  AsrStatus,
+  AsrTranscribeResponse,
+  ConfigResponse,
+  DeleteWeightsStatus,
+  DownloadStatus,
+  EngineInfo,
+  HealthResponse,
+  InstallStatus,
+  SynthBase64Response,
+  SynthSpeaker,
+  SystemStats,
+  SynthProgress,
+  TranslateStatus,
+  UninstallStatus,
+  UploadVoiceResponse,
+  Voice,
+  VoxcpmModelPathResponse,
+} from "@/types/models";
+
+const API_BASE =
+  (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
+
+async function jsonOrThrow<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as {
+        detail?: string | Array<{ msg?: string; loc?: unknown[] }>;
+        code?: string;
+      };
+      if (body.detail) {
+        if (typeof body.detail === "string") {
+          detail = body.detail;
+        } else if (Array.isArray(body.detail)) {
+          // FastAPI validation error: array of {loc, msg, type}
+          detail = body.detail
+            .map((d) => (d.loc?.slice(-1)?.[0] ? `${d.loc.slice(-1)[0]}: ${d.msg}` : d.msg ?? ""))
+            .filter(Boolean)
+            .join("; ") || detail;
+        } else {
+          detail = String(body.detail);
+        }
+      }
+    } catch {
+      // ignore JSON parse errors; fall through with statusText
+    }
+    throw new ApiError(detail, res.status);
+  }
+  return (await res.json()) as T;
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export async function getConfig(): Promise<ConfigResponse> {
+  return jsonOrThrow<ConfigResponse>(await fetch(`${API_BASE}/config`));
+}
+
+export async function getSynthProgress(): Promise<SynthProgress> {
+  return jsonOrThrow<SynthProgress>(await fetch(`${API_BASE}/synthesis/progress`));
+}
+
+export interface YoutubeTranscriptResponse {
+  video_id: string;
+  text: string;
+  language: string;
+  duration_sec: number;
+  inference_ms: number;
+  segments: Array<{ start: number; end: number; text: string; segmented?: string }>;
+  source: "captions" | "asr";
+  kind: "captions" | "auto_cc" | "asr";
+  is_generated: boolean;
+  thumbnail_url: string;
+  audio_url: string;
+  video_url: string;
+  created_at?: number;
+}
+
+export interface YoutubeHistoryEntry extends YoutubeTranscriptResponse {
+  language_name?: string;
+  original?: {
+    text: string;
+    segments?: Array<{ start: number; end: number; text: string }>;
+    source?: string | null;
+    kind?: string | null;
+    is_generated?: boolean;
+    created_at?: number;
+  } | null;
+}
+
+export async function transcribeYoutube(
+  url: string,
+  args: { language?: string | null; timestamps?: boolean; forceAsr?: boolean } = {},
+): Promise<YoutubeTranscriptResponse> {
+  return jsonOrThrow<YoutubeTranscriptResponse>(
+    await fetch(`${API_BASE}/youtube/transcript`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        language: args.language ?? null,
+        timestamps: !!args.timestamps,
+        force_asr: !!args.forceAsr,
+      }),
+    }),
+  );
+}
+
+export async function correctYoutubeTranscript(
+  entry: { video_id: string; text: string; language?: string; segments?: Array<{ start: number; end: number; text: string }> },
+): Promise<YoutubeHistoryEntry> {
+  return jsonOrThrow<YoutubeHistoryEntry>(
+    await fetch(`${API_BASE}/youtube/transcript/correct`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        video_id: entry.video_id,
+        text: entry.text,
+        language: entry.language ?? "km",
+        segments: entry.segments ?? [],
+      }),
+    }),
+  );
+}
+
+export async function getYoutubeHistory(): Promise<{ entries: YoutubeHistoryEntry[] }> {
+  return jsonOrThrow<{ entries: YoutubeHistoryEntry[] }>(await fetch(`${API_BASE}/youtube/history`));
+}
+
+export async function deleteYoutubeHistory(videoId: string): Promise<{ deleted: string }> {
+  return jsonOrThrow<{ deleted: string }>(
+    await fetch(`${API_BASE}/youtube/history/${encodeURIComponent(videoId)}`, { method: "DELETE" }),
+  );
+}
+
+export async function clearYoutubeHistory(): Promise<{ removed: number }> {
+  return jsonOrThrow<{ removed: number }>(
+    await fetch(`${API_BASE}/youtube/history`, { method: "DELETE" }),
+  );
+}
+
+// ---- local VoxCPM2 model folder ----
+
+export async function setVoxcpmModelPath(
+  path: string | null,
+): Promise<VoxcpmModelPathResponse> {
+  return jsonOrThrow<VoxcpmModelPathResponse>(
+    await fetch(`${API_BASE}/config/voxcpm-model-path`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+  );
+}
+
+export async function chooseVoxcpmFolder(): Promise<VoxcpmModelPathResponse> {
+  return jsonOrThrow<VoxcpmModelPathResponse>(
+    await fetch(`${API_BASE}/config/choose-voxcpm-folder`, { method: "POST" }),
+  );
+}
+
+export async function getSystemStats(): Promise<SystemStats> {
+  return jsonOrThrow<SystemStats>(await fetch(`${API_BASE}/system/stats`));
+}
+
+// ---- ASR (speech-to-text) ----
+
+export async function getAsrStatus(): Promise<AsrStatus> {
+  return jsonOrThrow<AsrStatus>(await fetch(`${API_BASE}/asr/status`));
+}
+
+export async function activateAsrModel(modelId: string): Promise<{
+  model_id: string;
+  label: string;
+  downloading: boolean;
+  percent: number | null;
+  active?: boolean;
+}> {
+  return jsonOrThrow(
+    await fetch(`${API_BASE}/asr/model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_id: modelId }),
+    }),
+  );
+}
+
+export interface TranscribeArgs {
+  /** Exactly one of `file` / `cacheHash`. */
+  file?: File;
+  cacheHash?: string;
+  language?: string | null; // null/undefined => auto-detect
+  timestamps?: boolean;
+}
+
+export async function transcribe(args: TranscribeArgs): Promise<AsrTranscribeResponse> {
+  const form = new FormData();
+  if (args.file) form.append("file", args.file);
+  if (args.cacheHash) form.append("cache_hash", args.cacheHash);
+  if (args.language) form.append("language", args.language);
+  form.append("timestamps", String(!!args.timestamps));
+
+  const res = await fetch(`${API_BASE}/asr/transcribe`, { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const b = (await res.json()) as { detail?: string | { msg?: string }[] };
+      if (typeof b.detail === "string") detail = b.detail;
+      else if (Array.isArray(b.detail) && b.detail[0]?.msg) detail = b.detail[0].msg!;
+    } catch {
+      /* keep statusText */
+    }
+    throw new ApiError(detail, res.status);
+  }
+  return (await res.json()) as AsrTranscribeResponse;
+}
+
+/** Transcribe a stored reference voice. The caller decides whether to save it. */
+export async function transcribeVoice(
+  voiceId: string,
+  language?: string | null,
+): Promise<{ text: string; language: string }> {
+  return jsonOrThrow(
+    await fetch(`${API_BASE}/voices/${encodeURIComponent(voiceId)}/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language: language ?? null }),
+    }),
+  );
+}
+
+// ---- dub (voice-to-voice re-voicing) ----
+
+export interface DubArgs {
+  segments: { start: number; end: number; text: string }[];
+  voice: string;
+  engine?: string;
+  voice_mode?: "clone" | "design" | "auto";
+  instruct?: string;
+  source_language?: string;
+  target_language?: string;
+  translator?: string;
+}
+
+// ---- translation ----
+
+export async function getTranslateStatus(): Promise<TranslateStatus> {
+  return jsonOrThrow<TranslateStatus>(await fetch(`${API_BASE}/translate/status`));
+}
+
+export async function activateTranslator(name: string): Promise<TranslateStatus> {
+  return jsonOrThrow<TranslateStatus>(await fetch(`${API_BASE}/translate/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }));
+}
+
+export interface TranslateSegment { start: number; end: number; text: string }
+
+/** Translate a list of segments; returns the translated segments (same order). */
+export async function translateSegments(args: {
+  segments: TranslateSegment[];
+  source_lang: string | null;
+  target_lang: string;
+  model?: string;
+}): Promise<{ segments: TranslateSegment[]; source_lang: string; target_lang: string }> {
+  return jsonOrThrow(await fetch(`${API_BASE}/translate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  }));
+}
+
+/** Re-voice transcript segments; returns the dubbed WAV as an ArrayBuffer. */
+export async function dub(
+  args: DubArgs,
+): Promise<{ audio: ArrayBuffer; sampleRate: number; cacheHash: string | null }> {
+  const res = await fetch(`${API_BASE}/dub`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const b = (await res.json()) as { detail?: string | { msg?: string }[] };
+      if (typeof b.detail === "string") detail = b.detail;
+      else if (Array.isArray(b.detail) && b.detail[0]?.msg) detail = b.detail[0].msg!;
+    } catch {
+      /* keep statusText */
+    }
+    throw new ApiError(detail, res.status);
+  }
+  return {
+    audio: await res.arrayBuffer(),
+    sampleRate: Number(res.headers.get("X-Sample-Rate") ?? "24000"),
+    cacheHash: res.headers.get("X-Cache-Hash"),
+  };
+}
+
+export interface CacheEntryInfo {
+  hash: string;
+  sample_rate: number;
+  duration_sec: number;
+  inference_ms: number;
+  size_bytes: number;
+  created_at: number;
+  text: string | null;
+  voice: string | null;
+  name: string;
+  engine: string | null;
+  word_count: number | null;
+  char_count: number | null;
+  machine: {
+    os: string | null;
+    cpu: string | null;
+    ram_gb: number | null;
+    gpu: string | null;
+    python: string | null;
+  } | null;
+}
+
+export interface CacheListResponse {
+  enabled: boolean;
+  directory: string;
+  entry_count: number;
+  max_entries: number;
+  entries: CacheEntryInfo[];
+}
+
+export async function listCache(): Promise<CacheListResponse> {
+  return jsonOrThrow<CacheListResponse>(await fetch(`${API_BASE}/cache`));
+}
+
+export async function clearCache(): Promise<{ removed: number }> {
+  return jsonOrThrow<{ removed: number }>(
+    await fetch(`${API_BASE}/cache`, { method: "DELETE" }),
+  );
+}
+
+export async function deleteCacheEntry(hash: string): Promise<{ deleted: string }> {
+  return jsonOrThrow<{ deleted: string }>(
+    await fetch(`${API_BASE}/cache/${encodeURIComponent(hash)}`, { method: "DELETE" }),
+  );
+}
+
+/** Returns the relative URL for streaming a cached clip's WAV. */
+export function cacheAudioUrl(hash: string): string {
+  return `/api/cache/${hash}/audio`;
+}
+
+/** Ask the local backend to open the cache directory in the OS file manager. */
+export async function openCacheFolder(): Promise<{ opened: string }> {
+  return jsonOrThrow<{ opened: string }>(
+    await fetch(`${API_BASE}/cache/folder`, { method: "POST" }),
+  );
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  return jsonOrThrow<HealthResponse>(await fetch(`${API_BASE}/health`));
+}
+
+export async function listVoices(): Promise<Voice[]> {
+  const data = await jsonOrThrow<{ voices: Voice[] }>(
+    await fetch(`${API_BASE}/voices`),
+  );
+  return data.voices;
+}
+
+export interface VoiceMetadata {
+  name?: string;
+  gender?: string;
+  language?: string;
+  reference_transcript?: string;
+}
+
+export interface EngineListResponse {
+  active: string;
+  engines: EngineInfo[];
+}
+
+export async function listEngines(): Promise<EngineListResponse> {
+  return jsonOrThrow<EngineListResponse>(
+    await fetch(`${API_BASE}/engines`),
+  );
+}
+
+export async function activateEngine(name: string): Promise<EngineInfo> {
+  return jsonOrThrow<EngineInfo>(
+    await fetch(`${API_BASE}/engines/activate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  );
+}
+
+export async function loadEngine(name: string): Promise<EngineInfo> {
+  return jsonOrThrow<EngineInfo>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/load`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function startEngineInstall(name: string): Promise<InstallStatus> {
+  return jsonOrThrow<InstallStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/install`, { method: "POST" }),
+  );
+}
+
+export async function getEngineInstallStatus(name: string): Promise<InstallStatus> {
+  return jsonOrThrow<InstallStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/install`),
+  );
+}
+
+export async function startModelDownload(name: string): Promise<DownloadStatus> {
+  return jsonOrThrow<DownloadStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/download`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function getModelDownloadStatus(name: string): Promise<DownloadStatus> {
+  return jsonOrThrow<DownloadStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/download`),
+  );
+}
+
+export async function cancelModelDownload(name: string): Promise<DownloadStatus> {
+  return jsonOrThrow<DownloadStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/download/cancel`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function startDeleteWeights(name: string): Promise<DeleteWeightsStatus> {
+  return jsonOrThrow<DeleteWeightsStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/delete-weights`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function getDeleteWeightsStatus(name: string): Promise<DeleteWeightsStatus> {
+  return jsonOrThrow<DeleteWeightsStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/delete-weights`),
+  );
+}
+
+export async function startUninstallEngine(name: string): Promise<UninstallStatus> {
+  return jsonOrThrow<UninstallStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/uninstall`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function getUninstallStatus(name: string): Promise<UninstallStatus> {
+  return jsonOrThrow<UninstallStatus>(
+    await fetch(`${API_BASE}/engines/${encodeURIComponent(name)}/uninstall`),
+  );
+}
+
+export async function uploadVoice(
+  file: File,
+  meta: VoiceMetadata = {},
+): Promise<UploadVoiceResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (meta.name) fd.append("name", meta.name);
+  if (meta.gender) fd.append("gender", meta.gender);
+  if (meta.language) fd.append("language", meta.language);
+  return jsonOrThrow<UploadVoiceResponse>(
+    await fetch(`${API_BASE}/voices/upload`, { method: "POST", body: fd }),
+  );
+}
+
+export async function updateVoiceMeta(
+  voiceId: string,
+  meta: VoiceMetadata,
+): Promise<Voice> {
+  return jsonOrThrow<Voice>(
+    await fetch(`${API_BASE}/voices/${encodeURIComponent(voiceId)}/meta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(meta),
+    }),
+  );
+}
+
+export async function editBuiltInVoice(
+  voiceId: string,
+  meta: VoiceMetadata,
+): Promise<Voice> {
+  return jsonOrThrow<Voice>(
+    await fetch(`${API_BASE}/voices/${encodeURIComponent(voiceId)}/meta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(meta),
+    }),
+  );
+}
+
+export async function deleteVoice(voiceId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/voices/${encodeURIComponent(voiceId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    await jsonOrThrow(res); // throws ApiError
+  }
+}
+
+/**
+ * Synthesize text → speech, returning the WAV bytes as an ArrayBuffer.
+ * Backend may return either audio/wav (default) or JSON (response_format=base64).
+ *
+ * @param text       Script text. If it doesn't contain `Speaker N:` lines, the
+ *                   backend wraps it as a single-speaker script using speakers[0].
+ * @param speakers   Ordered list of speakers in the script. Each entry has a
+ *                   `name` (used in `Speaker <name>: ...` tags after normalization)
+ *                   and a `voice` (Voice.id to use for that speaker's reference audio).
+ */
+export async function synthesizeWav(
+  text: string,
+  speakers: SynthSpeaker[],
+  cfgScale?: number,
+  options: {
+    forceRegenerate?: boolean;
+    cfgWeight?: number | null;
+    exaggeration?: number | null;
+    languageId?: string | null;
+    inferenceSteps?: number | null;
+    temperature?: number | null;
+    topP?: number | null;
+    topK?: number | null;
+    repetitionPenalty?: number | null;
+    seed?: number | null;
+  } = {},
+): Promise<{ audioData: ArrayBuffer; sampleRate: number; durationSec: number; inferenceMs: number; cacheHit: boolean; cacheHash: string | null }> {
+  const res = await fetch(`${API_BASE}/synthesize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      speakers,
+      ...(cfgScale !== undefined ? { cfg_scale: cfgScale } : {}),
+      ...(options.cfgWeight != null ? { cfg_weight: options.cfgWeight } : {}),
+      ...(options.exaggeration != null ? { exaggeration: options.exaggeration } : {}),
+      ...(options.languageId ? { language_id: options.languageId } : {}),
+      ...(options.inferenceSteps != null ? { inference_steps: options.inferenceSteps } : {}),
+      ...(options.temperature != null ? { temperature: options.temperature } : {}),
+      ...(options.topP != null ? { top_p: options.topP } : {}),
+      ...(options.topK != null ? { top_k: options.topK } : {}),
+      ...(options.repetitionPenalty != null ? { repetition_penalty: options.repetitionPenalty } : {}),
+      ...(options.seed != null ? { seed: options.seed } : {}),
+      ...(options.forceRegenerate ? { force_regenerate: true } : {}),
+    }),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { detail?: string; code?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(detail, res.status);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const payload = (await res.json()) as SynthBase64Response;
+    const binary = atob(payload.audio_b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return {
+      audioData: bytes.buffer,
+      sampleRate: payload.sample_rate,
+      durationSec: payload.duration_sec,
+      inferenceMs: payload.inference_ms,
+      cacheHit: res.headers.get("X-Cache") === "hit",
+      cacheHash: res.headers.get("X-Cache-Hash"),
+    };
+  }
+
+  const audioData = await res.arrayBuffer();
+  const sampleRate = Number(res.headers.get("X-Sample-Rate") ?? "24000");
+  const durationSec = Number(res.headers.get("X-Audio-Duration-Sec") ?? "0");
+  const inferenceMs = Number(res.headers.get("X-Inference-Ms") ?? "0");
+  return {
+    audioData,
+    sampleRate,
+    durationSec,
+    inferenceMs,
+    cacheHit: res.headers.get("X-Cache") === "hit",
+    cacheHash: res.headers.get("X-Cache-Hash"),
+  };
+}
+
+export interface DownloadSegmentPayload {
+  text: string;
+  voice: string;
+  cfg_scale?: number;
+  cache_hash?: string;
+  cfg_weight?: number;
+  exaggeration?: number;
+  language_id?: string;
+  voice_mode?: "clone" | "design" | "auto";
+  instruct?: string;
+  inference_steps?: number;
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  repetition_penalty?: number;
+  seed?: number;
+}
+
+export async function downloadPodcast(
+  segments: DownloadSegmentPayload[],
+  silenceGapMs = 150,
+): Promise<{ audioData: ArrayBuffer; sampleRate: number; durationSec: number; cacheHit: boolean; cacheHash: string | null }> {
+  const res = await fetch(`${API_BASE}/download`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ segments, silence_gap_ms: silenceGapMs }),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { detail?: string; code?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(detail, res.status);
+  }
+  const audioData = await res.arrayBuffer();
+  return {
+    audioData,
+    sampleRate: Number(res.headers.get("X-Sample-Rate") ?? "24000"),
+    durationSec: Number(res.headers.get("X-Audio-Duration-Sec") ?? "0"),
+    cacheHit: res.headers.get("X-Cache") === "hit",
+    cacheHash: res.headers.get("X-Cache-Hash"),
+  };
+}
