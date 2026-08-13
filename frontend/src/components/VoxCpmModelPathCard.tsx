@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 import { ApiError, chooseVoxcpmFolder, setVoxcpmModelPath } from "@/lib/api";
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
 }
 
 export function VoxCpmModelPathCard({ isDark, modelPath, onRefreshConfig }: Props) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState(modelPath ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +61,7 @@ export function VoxCpmModelPathCard({ isDark, modelPath, onRefreshConfig }: Prop
 
   return (
     <div className="space-y-1.5 mt-4">
-      <div className={`text-xs font-medium ${text}`}>Local VoxCPM2 model folder</div>
+      <div className={`text-xs font-medium ${text}`}>{t("controls.localModel")}</div>
       <div className="flex gap-1">
         <input
           value={draft}
@@ -92,7 +94,7 @@ export function VoxCpmModelPathCard({ isDark, modelPath, onRefreshConfig }: Prop
               : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200"
           } ${busy ? "opacity-50 cursor-wait" : ""}`}
         >
-          Use this folder
+          {t("vox.useThis")}
         </button>
         {modelPath && (
           <button

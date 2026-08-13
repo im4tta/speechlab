@@ -5,6 +5,7 @@ import type { EngineLanguage, Voice } from "@/types/models";
 import { textStats, fmtDuration, isRtlText, textDirection } from "@/lib/textStats";
 import { DESIGN_CHIPS, NONVERBAL_TAGS, appendDesignChip, type OmniMode } from "@/lib/voiceModes";
 import type { TtsHistoryItem } from "@/lib/ttsHistory";
+import { useI18n } from "@/lib/i18n";
 import { LanguageSelect } from "./LanguageSelect";
 
 interface Props {
@@ -48,6 +49,7 @@ export function TtsEditor(props: Props) {
     onGenerate, onPlay, onDownload, history, onUseText, onClearHistory,
   } = props;
   const stats = textStats(text);
+  const { t } = useI18n();
   const inputBg = isDark ? "bg-zinc-900 border-zinc-800 text-white" : "bg-white border-gray-200 text-gray-900";
   const selectBg = isDark ? "bg-zinc-800 border-zinc-700 text-white" : "bg-white border-gray-300 text-gray-900";
   const sub = isDark ? "text-zinc-400" : "text-gray-600";
@@ -107,7 +109,7 @@ export function TtsEditor(props: Props) {
         ref={textareaRef}
         value={text}
         onChange={(e) => onTextChange(e.target.value)}
-        placeholder="Type or paste text to synthesize…"
+        placeholder={t("tts.placeholder")}
         dir={textDirection(text)}
         className={`w-full min-h-[260px] rounded-xl border p-4 text-sm leading-relaxed focus:outline-none focus:border-indigo-500 ${inputBg} ${
           isRtlText(text) ? "text-right" : "text-left"
@@ -198,7 +200,7 @@ export function TtsEditor(props: Props) {
             type="text"
             value={voiceDesign}
             onChange={(e) => onVoiceDesignChange(e.target.value)}
-            placeholder="Style (optional) — e.g. cheerful, slightly faster, whispering"
+            placeholder={t("tts.style")} // Qwen style
             className={`w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-500 ${selectBg}`}
           />
         </div>
@@ -216,14 +218,14 @@ export function TtsEditor(props: Props) {
             <div className="space-y-1.5">
               <p className={`text-xs ${sub}`}>
                 Clones the voice selected in the library:{" "}
-                <span className="text-indigo-300">{activeVoice ? activeVoice.name : "none selected"}</span>
+                <span className="text-indigo-300">{activeVoice ? activeVoice.name : t("tts.none")}</span>
               </p>
               {supportsStyleClone && (
                 <input
                   type="text"
                   value={voiceDesign}
                   onChange={(e) => onVoiceDesignChange(e.target.value)}
-                  placeholder="Style (optional) — e.g. cheerful, slightly faster"
+                  placeholder={t("tts.style")}
                   className={`w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-500 ${selectBg}`}
                 />
               )}
@@ -270,7 +272,7 @@ export function TtsEditor(props: Props) {
 
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className={`text-xs ${sub}`}>
-          {stats.chars} chars · {stats.words} words · {fmtDuration(stats.seconds)}
+          {t("tts.stats", { c: stats.chars, w: stats.words, s: fmtDuration(stats.seconds) })}
         </div>
         <div className="flex items-center gap-2">
           {showLanguage && (
@@ -278,7 +280,7 @@ export function TtsEditor(props: Props) {
           )}
           {showVoiceNote && (
             <span className={`text-xs ${sub}`}>
-              Voice: <span className="text-indigo-300">{activeVoice ? activeVoice.name : "none selected"}</span>
+              {t("tts.voice")}: <span className="text-indigo-300">{activeVoice ? activeVoice.name : t("tts.none")}</span>
             </span>
           )}
           <button type="button" onClick={onGenerate} disabled={busy || !text.trim()}

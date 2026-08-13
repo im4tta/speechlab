@@ -12,6 +12,7 @@ import { ModeToggle } from "./ModeToggle";
 import { StudioLogo } from "./StudioLogo";
 import { TranscribeSettingsPopup } from "./TranscribeSettingsPopup";
 import { VoicePicker } from "./VoicePicker";
+import { useI18n } from "@/lib/i18n";
 
 interface Props {
   isDark: boolean;
@@ -93,6 +94,7 @@ export function TopBar({
 }: Props) {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
+  const { t, lang, setLang } = useI18n();
 
   const selectedVoice = voices.find((v) => v.id === selectedVoiceId) ?? null;
   const isTranscribe = mode === "transcribe";
@@ -111,7 +113,7 @@ export function TopBar({
             SpeechLab
           </div>
           <div className={`text-[10px] tabular-nums ${isDark ? "text-zinc-500" : "text-gray-500"}`}>
-            {version ? `v${version}` : ""} · AI Voice Studio
+            {version ? `v${version}` : ""} · {t("brand.tagline")}
           </div>
         </div>
       </div>
@@ -134,7 +136,7 @@ export function TopBar({
               isDark,
               voiceOpen,
             )} ${focusRing}`}
-            title="Voices"
+            title={t("header.voices")}
           >
             <Mic2 className="w-4 h-4" />
             <span className="hidden xl:inline max-w-28 truncate">
@@ -152,10 +154,10 @@ export function TopBar({
               isDark,
               transcribeOpen,
             )} ${focusRing}`}
-            title="Transcription settings"
+            title={t("header.settings")}
           >
             <Settings2 className="w-4 h-4" />
-            <span className="hidden lg:inline">Settings</span>
+            <span className="hidden lg:inline">{t("header.settings")}</span>
           </button>
         )}
 
@@ -190,10 +192,10 @@ export function TopBar({
             isDark,
             monitorOpen,
           )} ${focusRing}`}
-          title="System monitor"
+          title={t("header.monitor")}
         >
           <Activity className="w-4 h-4" />
-          <span className="hidden lg:inline">Monitor</span>
+          <span className="hidden lg:inline">{t("header.monitor")}</span>
         </button>
 
         {/* Controls full page */}
@@ -203,10 +205,10 @@ export function TopBar({
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${iconBtn(
             isDark,
           )} ${focusRing}`}
-          title="Open controls full page"
+          title={t("header.controls")}
         >
           <Maximize2 className="w-4 h-4" />
-          <span className="hidden lg:inline">Controls</span>
+          <span className="hidden lg:inline">{t("header.controls")}</span>
         </button>
 
         {/* Recent generations */}
@@ -216,10 +218,10 @@ export function TopBar({
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${iconBtn(
             isDark,
           )} ${focusRing}`}
-          title="Recent generations"
+          title={t("header.recent")}
         >
           <LayoutGrid className="w-4 h-4" />
-          <span className="hidden lg:inline">Recent</span>
+          <span className="hidden lg:inline">{t("header.recent")}</span>
         </button>
 
         {/* Credits / about */}
@@ -233,12 +235,23 @@ export function TopBar({
           <CircleHelp className="w-4 h-4" />
         </button>
 
+        {/* Language toggle */}
+        <button
+          type="button"
+          onClick={() => setLang(lang === "km" ? "en" : "km")}
+          className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold transition-colors ${iconBtn(isDark)} ${focusRing}`}
+          title={lang === "km" ? "Switch to English" : "ប្តូរទៅជាភាសាខ្មែរ"}
+          aria-label="Toggle language"
+        >
+          {lang === "km" ? "EN" : "ខ្មែរ"}
+        </button>
+
         {/* Appearance / theme */}
         <button
           type="button"
           onClick={onThemeToggle}
           className={`p-2 rounded-lg transition-colors ${iconBtn(isDark)} ${focusRing}`}
-          title="Toggle appearance (dark / light)"
+          title={t("header.theme")}
           aria-label="Toggle appearance"
         >
           {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}

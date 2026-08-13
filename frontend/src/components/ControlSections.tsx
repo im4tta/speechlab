@@ -1,5 +1,6 @@
 import { getCfgHints } from "@/lib/engineHints";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 import type { CacheListResponse } from "@/lib/api";
 import type { ControlPanelProps } from "./ControlPanel";
 import { CacheBody } from "./CachePanel";
@@ -60,6 +61,7 @@ export function ControlSections({
   onOpenRecent,
 }: ControlSectionsProps) {
   const heading = isDark ? "text-zinc-400" : "text-gray-600";
+  const { t } = useI18n();
   const cfgHints = getCfgHints(activeEngine);
   const isChatterbox = activeEngine === "chatterbox";
   const isVoxCpm2 = activeEngine === "voxcpm" || activeEngine === "nanovllm_km";
@@ -78,7 +80,7 @@ export function ControlSections({
       {/* Engine section */}
       <section className={sectionCls}>
         <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 ${heading}`}>
-          Engine
+          {t("controls.engine")}
         </h3>
         <EngineSelector
           isDark={isDark}
@@ -97,7 +99,7 @@ export function ControlSections({
       {/* Translation section */}
       <section className={sectionCls}>
         <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 ${heading}`}>
-          Translation
+          {t("controls.translation")}
         </h3>
         <TranslationCard
           isDark={isDark}
@@ -111,7 +113,7 @@ export function ControlSections({
       {/* Settings section */}
       <section className={`${sectionCls} ${span2}`}>
         <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 ${heading}`}>
-          {isChatterbox ? "CFG weight (voice fidelity)" : "Voice fidelity (CFG)"}
+          {isChatterbox ? t("controls.cfg.chatterbox") : t("controls.cfg")}
         </h3>
         <CfgScaleBody
           isDark={isDark}
@@ -123,7 +125,7 @@ export function ControlSections({
         {isChatterbox && (
           <>
             <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 mt-4 ${heading}`}>
-              Voice expressiveness (Chatterbox)
+              {t("controls.exaggeration")}
             </h3>
             <ExaggerationBody
               isDark={isDark}
@@ -157,16 +159,16 @@ export function ControlSections({
               ))}
             </div>
             <p className={`text-[11px] ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
-              Diffusion steps: Fast 5 · Balanced 10 · High 25. Higher = better quality, slower.
+              {t("controls.quality.hint")}
             </p>
           </div>
         )}
 
         {activeEngine === "qwen" && qwenParams && onQwenParamsChange && (
           <div className="space-y-2 mt-4">
-            <div className={`text-xs font-medium ${isDark ? "text-zinc-300" : "text-gray-700"}`}>
-              Advanced generation
-            </div>
+              <div className={`text-xs font-medium ${isDark ? "text-zinc-300" : "text-gray-700"}`}>
+                {t("controls.advanced")}
+              </div>
             {([
               { key: "temperature", label: "Temperature", min: 0.1, max: 2.0, step: 0.05 },
               { key: "topP", label: "Top-p", min: 0.0, max: 1.0, step: 0.05 },
@@ -184,7 +186,7 @@ export function ControlSections({
               </label>
             ))}
             <label className={`block text-[11px] ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
-              Seed (optional)
+              {t("controls.seed")}
               <input
                 type="number"
                 value={qwenParams.seed ?? ""}
@@ -201,7 +203,7 @@ export function ControlSections({
                 onClick={() => onQwenParamsChange(qwenDefaults)}
                 className={`text-[11px] underline ${isDark ? "text-zinc-400 hover:text-indigo-400" : "text-gray-600 hover:text-indigo-600"} ${focusRing}`}
               >
-                Reset to defaults
+                {t("controls.reset")}
               </button>
             )}
           </div>
@@ -238,7 +240,7 @@ export function ControlSections({
               : "text-gray-600 hover:text-gray-700"
           } ${focusRing}`}
         >
-          Refresh list
+          {t("controls.refresh")}
         </button>
       </section>
     </div>

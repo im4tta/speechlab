@@ -5,6 +5,7 @@ import { UploadVoiceDialog } from "./UploadVoiceDialog";
 import { VoiceMetaDialog } from "./VoiceMetaDialog";
 import { useConfirm } from "./ConfirmProvider";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 
 export interface VoicePickerProps {
   isDark: boolean;
@@ -33,6 +34,7 @@ export function VoicePicker({
   onClose,
 }: VoicePickerProps) {
   const confirm = useConfirm();
+  const { t } = useI18n();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingVoice, setEditingVoice] = useState<Voice | null>(null);
 
@@ -92,7 +94,7 @@ export function VoicePicker({
             setEditingVoice(v);
           }}
           className={`p-1 ${iconBtn} ${focusRing}`}
-          title="Edit name / gender / language"
+          title={t("voice.edit")}
         >
           <Pencil className="w-3.5 h-3.5" />
         </button>
@@ -110,7 +112,7 @@ export function VoicePicker({
               if (ok) void onRemoveVoice(v.id);
             }}
             className={`p-1 ${isDark ? "dark:text-red-400" : ""} ${iconBtn} ${focusRing}`}
-            title="Delete"
+            title={t("voice.delete")}
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -148,12 +150,12 @@ export function VoicePicker({
         <div className="flex-1 overflow-y-auto p-3 space-y-4">
           <section>
             <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 ${heading}`}>
-              Built-in voices
+              {t("voice.builtin")}
             </h3>
             <ul className="space-y-1">
               {builtins.map(row)}
               {builtins.length === 0 && (
-                <li className={`text-xs italic px-2 py-1.5 ${empty}`}>No built-in voices.</li>
+                <li className={`text-xs italic px-2 py-1.5 ${empty}`}>{t("voice.none")}</li>
               )}
             </ul>
           </section>
@@ -162,13 +164,13 @@ export function VoicePicker({
             <section>
               <div className="flex items-center justify-between mb-2">
                 <h3 className={`text-xs font-semibold uppercase tracking-wide ${heading}`}>
-                  My voices
+                  {t("voice.mine")}
                 </h3>
                 <button
                   type="button"
                   onClick={() => setUploadOpen(true)}
                   className={`p-1 ${iconBtn} ${focusRing}`}
-                  title="Upload voice"
+                  title={t("voice.upload")}
                 >
                   <Plus className="w-4 h-4" />
                 </button>
@@ -176,7 +178,7 @@ export function VoicePicker({
               <ul className="space-y-1">
                 {uploads.map(row)}
                 {uploads.length === 0 && (
-                  <li className={`text-xs italic px-2 py-1.5 ${empty}`}>Click + to upload a voice.</li>
+                  <li className={`text-xs italic px-2 py-1.5 ${empty}`}>{t("voice.uploadHint")}</li>
                 )}
               </ul>
             </section>

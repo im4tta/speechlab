@@ -4,6 +4,7 @@ import { ImportExportMenu } from "./ImportExportMenu";
 import type { Sample, TtsSample } from "@/lib/samples";
 import type { ProjectMode } from "@/types/models";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 
 interface Props {
   validCount: number;
@@ -36,6 +37,7 @@ export function MiddleToolbar({
   onExportSubtitles,
   subtitlesDisabled,
 }: Props) {
+  const { t } = useI18n();
   const generateDisabled = busy || cachedCount === validCount;
   const isPodcast = mode === "podcast";
 
@@ -57,7 +59,7 @@ export function MiddleToolbar({
             className={`flex items-center gap-1.5 px-3 py-2 accent-gradient text-black hover:opacity-90 disabled:bg-zinc-700 disabled:bg-none disabled:text-zinc-400 rounded-lg font-medium text-sm transition-opacity disabled:cursor-not-allowed ${focusRing}`}
           >
             <Plus className="w-4 h-4" />
-            <span className="hidden @[1100px]:inline">Add Segment</span>
+            <span className="hidden @[1100px]:inline">{t("toolbar.addSegment")}</span>
           </button>
         )}
       </div>
@@ -78,7 +80,7 @@ export function MiddleToolbar({
             } ${focusRing}`}
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span className="hidden @[1100px]:inline">Generate All</span>
+            <span className="hidden @[1100px]:inline">{t("toolbar.generateAll")}</span>
             {validCount > 0 && (
               <span
                 className={`text-xs ml-1 ${

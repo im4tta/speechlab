@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import { Sparkles } from "lucide-react";
 import { useSystemStats } from "@/hooks/useSystemStats";
 import type { EngineInfo } from "@/types/models";
@@ -75,6 +76,7 @@ interface Props {
 }
 
 export function RecommendationCard({ isDark, engines }: Props) {
+  const { t } = useI18n();
   const stats = useSystemStats(true);
   const vramGb = stats?.vram?.total_bytes ? stats.vram.total_bytes / 1e9 : null;
 
@@ -87,8 +89,8 @@ export function RecommendationCard({ isDark, engines }: Props) {
     });
 
   const title = vramGb
-    ? `Pick a model for your ${Math.round(vramGb)} GB GPU`
-    : "Pick a model for your hardware";
+    ? t("rec.title.gpu", { n: Math.round(vramGb) })
+    : t("rec.title.noGpu");
 
   return (
     <section
@@ -106,7 +108,7 @@ export function RecommendationCard({ isDark, engines }: Props) {
       </h3>
       {!stats ? (
         <p className={`text-[11px] ${isDark ? "text-zinc-500" : "text-gray-500"}`}>
-          Reading your hardware…
+          {t("rec.loading")}
         </p>
       ) : (
         <ul className="space-y-1.5">

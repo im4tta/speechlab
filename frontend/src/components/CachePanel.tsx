@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Database, Download, FolderOpen, Maximize2, Pause, Play, Trash2, X } from "lucide-react";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 import {
   cacheAudioUrl,
   clearCache,
@@ -114,6 +115,7 @@ interface BodyProps {
 
 /** Reusable cache list body — rendered as a Recent generations playlist. */
 export function CacheBody({ isDark, data, busy, onClear, onDelete, onExpand, fullHeight }: BodyProps) {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const [playingHash, setPlayingHash] = useState<string | null>(null);
   const [detail, setDetail] = useState<CacheEntryInfo | null>(null);
@@ -221,7 +223,7 @@ export function CacheBody({ isDark, data, busy, onClear, onDelete, onExpand, ful
             isDark ? "text-zinc-400" : "text-gray-600"
           }`}
         >
-          Recent generations
+          {t("cache.recent")}
         </h3>
         <div className="flex items-center gap-0.5">
           {onExpand && (
@@ -256,7 +258,7 @@ export function CacheBody({ isDark, data, busy, onClear, onDelete, onExpand, ful
             type="button"
             onClick={handleClear}
             disabled={busy || data.entry_count === 0}
-            title="Clear all"
+            title={t("cache.clear")}
             className={`p-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               isDark
                 ? "text-zinc-400 hover:text-red-400"
@@ -347,7 +349,7 @@ export function CacheBody({ isDark, data, busy, onClear, onDelete, onExpand, ful
                           ? "text-zinc-400 hover:text-indigo-400"
                           : "text-gray-600 hover:text-indigo-600"
                       } ${focusRing}`}
-                      title="Download WAV"
+                      title={t("cache.download")}
                     >
                       <Download className="w-3.5 h-3.5" />
                     </button>
@@ -360,7 +362,7 @@ export function CacheBody({ isDark, data, busy, onClear, onDelete, onExpand, ful
                           ? "text-zinc-400 hover:text-red-400"
                           : "text-gray-600 hover:text-red-700"
                       } ${focusRing}`}
-                      title="Delete this entry"
+                      title={t("cache.delete")}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

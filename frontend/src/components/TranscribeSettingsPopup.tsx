@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, Download, Loader2, X } from "lucide-react";
 import type { AsrStatus, TranscribeBuffer } from "@/types/models";
 import { focusRing } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 
 interface Props {
   isDark: boolean;
@@ -29,6 +30,7 @@ export function TranscribeSettingsPopup({
 }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const { t } = useI18n();
 
   const pick = async (id: string) => {
     if (busyId) return;
@@ -96,7 +98,7 @@ export function TranscribeSettingsPopup({
           }`}
         >
           <h2 className={`text-sm font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>
-            Transcription
+            {t("tr.title")}
           </h2>
           <button
             type="button"
@@ -112,7 +114,7 @@ export function TranscribeSettingsPopup({
           {/* ASR model picker */}
           <div>
             <h3 className={`text-xs font-semibold uppercase tracking-wide mb-2 ${heading}`}>
-              Speech-to-text model
+              {t("tr.model")}
             </h3>
             {!asr ? (
               <p className={`text-xs ${subtle}`}>status unavailable</p>
@@ -187,7 +189,7 @@ export function TranscribeSettingsPopup({
           {/* Language */}
           <div>
             <label htmlFor="asr-language-popup" className={`block text-sm font-medium mb-1 ${label}`}>
-              Language
+              {t("tr.language")}
             </label>
             <select
               id="asr-language-popup"
@@ -195,7 +197,7 @@ export function TranscribeSettingsPopup({
               onChange={(e) => onChange({ language: e.target.value || null })}
               className={`w-full rounded-lg border px-3 py-2 text-sm ${inputBg} ${focusRing}`}
             >
-              <option value="">Auto-detect</option>
+              <option value="">{t("tr.autoDetect")}</option>
               {(asr?.languages ?? []).map((l) => (
                 <option key={l.code} value={l.code}>
                   {l.label}
@@ -215,14 +217,14 @@ export function TranscribeSettingsPopup({
                 onChange={(e) => onChange({ timestamps: e.target.checked })}
                 className={`accent-indigo-600 ${focusRing}`}
               />
-              Timestamps
+              {t("tr.timestamps")}
             </label>
             <p className={`text-xs mt-1 ${subtle}`}>Required to export .srt / .vtt subtitles.</p>
           </div>
 
           <div>
             <h3 className={`text-xs font-semibold uppercase tracking-wide mb-1 ${heading}`}>
-              Model status
+              {t("tr.modelStatus")}
             </h3>
             <div className={`text-xs ${subtle} space-y-1`}>
               <div className={bodyText}>{asr?.model_id ?? "—"}</div>
