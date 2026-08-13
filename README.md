@@ -2,6 +2,8 @@
 
 # SpeechLab — AI Voice Studio (Khmer)
 
+<img alt="SpeechLab UI screenshot" src="frontend/public/screenshot.png" />
+
 A fully-offline, local web studio for **multiple open-source TTS and speech-to-text
 engines**, tuned end-to-end for **Khmer (ភាសាខ្មែរ)** — plus podcast editing, video
 dubbing, YouTube transcription, offline translation, and more.
