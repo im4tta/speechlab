@@ -78,3 +78,16 @@ def test_whisper_is_not_a_tts_engine():
     from backend.core.engines import Engine
 
     assert not issubclass(WhisperEngine, Engine)
+
+
+def test_whisper_prefers_mps_on_apple_silicon(monkeypatch):
+    import torch
+
+    from backend.core.asr.whisper_engine import WhisperEngine
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert WhisperEngine(device_request="auto")._device() == "mps"
+    assert WhisperEngine(device_request="cpu")._device() == "cpu"
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    assert WhisperEngine(device_request="auto")._device() == "cpu"

@@ -4,7 +4,9 @@ import { useSystemStats } from "@/hooks/useSystemStats";
 import type { EngineInfo } from "@/types/models";
 
 // Curated per-engine hardware fit so the user can pick the right software for
-// their GPU. `vramGb` is null when there's no NVIDIA GPU.
+// their machine. `vramGb` is null when there's no NVIDIA GPU; on Apple Silicon
+// (`accelerator === "mps"`) models run from unified memory, so `ramGb` is the
+// budget instead.
 type Tone = "best" | "ok" | "slow" | "no";
 interface Fit {
   badge: string;
@@ -30,6 +32,35 @@ const TONE_CLS: Record<Tone, { badge: string; row: string }> = {
     row: "border-zinc-800 opacity-70",
   },
 };
+
+/** Apple Silicon: everything runs on MPS out of unified memory. */
+function fitForMac(name: string, ramGb: number): Fit | null {
+  const roomy = ramGb >= 16;
+  switch (name) {
+    case "kokoro":
+      return { badge: "Recommended", tone: "best", reason: "82M · fast on any Mac" };
+    case "kitten":
+      return { badge: "Recommended", tone: "best", reason: "~80M · tiny & instant" };
+    case "nanovllm_km":
+      return roomy
+        ? { badge: "Best for Khmer", tone: "best", reason: "2B · Apple GPU (MPS) via the reference runtime, same Khmer pipeline" }
+        : { badge: "Tight", tone: "slow", reason: "2B in float32 needs ~10 GB free — close other apps" };
+    case "voxcpm":
+      return roomy
+        ? { badge: "Runs on MPS", tone: "ok", reason: "2B · Apple GPU, float32 — slower than CUDA" }
+        : { badge: "Tight", tone: "slow", reason: "2B in float32 needs ~10 GB free" };
+    case "vibevoice":
+      return { badge: "Runs on MPS", tone: "ok", reason: "1.5B · Apple GPU" };
+    case "chatterbox":
+    case "omnivoice":
+    case "qwen":
+      return roomy
+        ? { badge: "Runs on MPS", tone: "ok", reason: "Apple GPU — slower than an NVIDIA card" }
+        : { badge: "Tight", tone: "slow", reason: "needs 16 GB+ unified memory to be comfortable" };
+    default:
+      return null;
+  }
+}
 
 function fitFor(name: string, vramGb: number | null): Fit | null {
   const gpu = vramGb != null && vramGb > 0;
@@ -57,14 +88,21 @@ function fitFor(name: string, vramGb: number | null): Fit | null {
         : { badge: "Needs 8 GB+", tone: "no", reason: gpu ? "too much VRAM for this GPU" : "no NVIDIA GPU" };
     case "voxcpm":
       return gpu && v >= 8
-        ? { badge: "Best for Khmer", tone: "best", reason: "2B · full GPU speed with your local model" }
+        ? { badge: "Fits", tone: "ok", reason: "2B · full GPU speed, one chunk at a time" }
         : gpu
-          ? { badge: "CPU offload", tone: "slow", reason: "2B · runs on your GPU via CPU-offload — slower" }
+          ? { badge: "CPU fallback", tone: "slow", reason: "2B · too big for this GPU, runs on CPU — slower" }
           : { badge: "CPU only", tone: "slow", reason: "no CUDA — very slow" };
     case "nanovllm_km":
+      // Pool sizing adapts to VRAM (core/voxcpm_runtime.py): 8 GB+ runs the
+      // batched runtime comfortably, 6–8 GB a slimmed profile, below that the
+      // same Khmer pipeline on the reference runtime.
       return gpu && v >= 8
-        ? { badge: "Best for Khmer", tone: "best", reason: "2B · batched, fastest on ≥8 GB GPUs" }
-        : { badge: "Needs 8 GB+", tone: "no", reason: "2B model + KV cache don't fit your GPU" };
+        ? { badge: "Best for Khmer", tone: "best", reason: "2B · batched chunks, fastest on ≥8 GB GPUs" }
+        : gpu && v >= 6
+          ? { badge: "Best for Khmer", tone: "ok", reason: "2B · slim nanovllm profile for 6–8 GB GPUs" }
+          : gpu
+            ? { badge: "CPU fallback", tone: "slow", reason: "2B · GPU too small, runs on CPU — slower" }
+            : { badge: "CPU only", tone: "slow", reason: "no CUDA — same Khmer pipeline on CPU, slow" };
     default:
       return null;
   }
@@ -79,18 +117,22 @@ export function RecommendationCard({ isDark, engines }: Props) {
   const { t } = useI18n();
   const stats = useSystemStats(true);
   const vramGb = stats?.vram?.total_bytes ? stats.vram.total_bytes / 1e9 : null;
+  const isMac = stats?.accelerator === "mps";
+  const ramGb = stats?.ram?.total_bytes ? stats.ram.total_bytes / 1e9 : 0;
 
   const rows = engines
-    .map((e) => ({ engine: e, fit: fitFor(e.name, vramGb) }))
+    .map((e) => ({ engine: e, fit: isMac ? fitForMac(e.name, ramGb) : fitFor(e.name, vramGb) }))
     .filter((r): r is { engine: EngineInfo; fit: Fit } => r.fit !== null)
     .sort((a, b) => {
       const order: Record<Tone, number> = { best: 0, ok: 1, slow: 2, no: 3 };
       return order[a.fit.tone] - order[b.fit.tone];
     });
 
-  const title = vramGb
-    ? t("rec.title.gpu", { n: Math.round(vramGb) })
-    : t("rec.title.noGpu");
+  const title = isMac
+    ? t("rec.title.mac", { n: Math.round(ramGb) })
+    : vramGb
+      ? t("rec.title.gpu", { n: Math.round(vramGb) })
+      : t("rec.title.noGpu");
 
   return (
     <section

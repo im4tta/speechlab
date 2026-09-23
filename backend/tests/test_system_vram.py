@@ -73,3 +73,13 @@ def test_vram_zero_total_does_not_divide_by_zero(monkeypatch):
     monkeypatch.setattr(sysmod, "_nvml_memory", lambda: (0, 0))
     v = sysmod._vram()
     assert v is not None and v.percent == 0.0
+
+
+def test_accelerator_reports_cuda_mps_or_cpu(monkeypatch):
+    fake_vram = sysmod.MemStat(used_bytes=1, total_bytes=2, percent=50.0)
+    assert sysmod._accelerator(fake_vram) == "cuda"
+    monkeypatch.setitem(sysmod._MPS_STATE, "tried", True)
+    monkeypatch.setitem(sysmod._MPS_STATE, "available", True)
+    assert sysmod._accelerator(None) == "mps"  # Apple Silicon
+    monkeypatch.setitem(sysmod._MPS_STATE, "available", False)
+    assert sysmod._accelerator(None) == "cpu"

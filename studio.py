@@ -334,6 +334,8 @@ def _ensure_engine_env_uv(
                 ["--index-url", index, "--reinstall", *specs])) != 0:
             print("  ERROR: CUDA torch install failed.")
             return False
+    elif platform.system() == "Darwin":
+        print(f"  Apple Silicon: {label} uses the default torch wheel (MPS-enabled).")
     else:
         print(f"  No matching torch CUDA build for this driver — {label} will "
               "run on CPU (slow).")
@@ -416,40 +418,81 @@ def _ensure_qwen_env() -> bool:
     )
 
 
+def nanovllm_requirements_file(profile: str) -> Path:
+    """Requirements for the nanovllm (Khmer) env: "full" = nano-vllm-voxcpm +
+    reference voxcpm fallback; "lite" = reference voxcpm only."""
+    name = "requirements-nanovllm.txt" if profile == "full" else "requirements-nanovllm-lite.txt"
+    return BACKEND_DIR / name
+
+
+def _nanovllm_plan() -> tuple[str, str, str | None]:
+    """Decide (profile, reason, torch_cuda_tag) for this machine.
+
+    The CUDA torch tag is kept for "lite" too when an NVIDIA GPU exists: an
+    older-but-big card (e.g. RTX 2080 Ti, T4) can't use flash-attn but still
+    runs the reference VoxCPM2 runtime on CUDA. Apple Silicon uses the default
+    PyPI wheel, which ships MPS support."""
+    tag = envdetect.detect_nanovllm_cuda_tag()
+    gpu = envdetect.detect_nvidia_gpu()
+    override = (os.environ.get("NANOVLLM_INSTALL_PROFILE") or "").strip().lower() or None
+    profile, reason = envdetect.nanovllm_install_profile(tag, gpu, override)
+    return profile, reason, tag
+
+
+def _nanovllm_python_ok() -> bool:
+    # Both runtimes need voxcpm/torchcodec (3.10–3.12); nano-vllm-voxcpm itself
+    # also requires Python < 3.13.
+    if _python_supported_for_voxcpm(sys.version_info):
+        return True
+    print("  ERROR: the Khmer VoxCPM2 engine requires Python 3.10–3.12 (you have "
+          f"{sys.version_info.major}.{sys.version_info.minor}). "
+          "Install a supported Python and re-run.")
+    return False
+
+
 def _ensure_nanovllm_env() -> bool:
     """Build/refresh the isolated nanovllm-voxcpm (Khmer) env.
 
-    Requires an NVIDIA GPU + CUDA >= 12 (nanovllm-voxcpm has no CPU path).
-    Uses the same torch-2.8 cu126/cu128 tag scheme as OmniVoice/VoxCPM/Qwen
-    so its torch build dedupes with theirs under uv's hardlinked cache.
+    Picks the runtime for this machine (envdetect.nanovllm_install_profile):
+    NVIDIA Ampere+ with ≥ 6 GB gets nano-vllm-voxcpm plus the reference
+    `voxcpm` runtime as a fallback; Apple Silicon, CPU-only machines and
+    older/smaller GPUs get just the reference runtime (flash-attn can't work
+    there). The worker makes the final runtime choice at load time. Uses the
+    same torch-2.8 cu126/cu128 tag scheme as OmniVoice/VoxCPM/Qwen so its
+    torch build dedupes with theirs under uv's hardlinked cache.
     """
+    if not _nanovllm_python_ok():
+        return False
+    profile, reason, tag = _nanovllm_plan()
+    print(f"  Khmer VoxCPM2 runtime: {profile} — {reason}")
     uv = _ensure_uv()
     if uv is None:
-        return _ensure_nanovllm_env_pip()
+        return _ensure_nanovllm_env_pip(profile, tag)
     ok = _ensure_engine_env_uv(
         uv,
         BACKEND_DIR / "venv-nanovllm",
-        BACKEND_DIR / "requirements-nanovllm.txt",
+        nanovllm_requirements_file(profile),
         nanovllm_ready_marker(REPO_ROOT),
-        "nanovllm-voxcpm",
-        envdetect.detect_nanovllm_cuda_tag(),
+        "nanovllm-voxcpm" if profile == "full" else "VoxCPM2 (Khmer, reference runtime)",
+        tag,
         torch_strategy="newest",
     )
-    if ok:
+    if ok and profile == "full":
         print(
             "  NOTE: nanovllm-voxcpm also requires flash-attn, which usually "
-            "can't be resolved from a plain PyPI index. If the engine fails "
-            "to load with a flash-attn import error, install a prebuilt "
-            "wheel matching your torch/CUDA/Python build into "
-            "backend/venv-nanovllm (see backend/requirements-nanovllm.txt)."
+            "can't be resolved from a plain PyPI index. If it's missing, the "
+            "engine still works — it falls back to the reference VoxCPM2 "
+            "runtime (one chunk at a time). For the concurrent fast path, "
+            "install a prebuilt flash-attn wheel matching your torch/CUDA/Python "
+            "into backend/venv-nanovllm (see backend/requirements-nanovllm.txt)."
         )
     return ok
 
 
-def _ensure_nanovllm_env_pip() -> bool:
+def _ensure_nanovllm_env_pip(profile: str = "full", tag: str | None = None) -> bool:
     """pip fallback (no uv) for the nanovllm-voxcpm env. Mirrors
-    `_ensure_voxcpm_env_pip`'s structure: install the package first, then
-    reinstall a CUDA-matched torch build."""
+    `_ensure_voxcpm_env_pip`'s structure: install the packages first, then
+    reinstall a CUDA-matched torch build when there's an NVIDIA GPU."""
     marker = nanovllm_ready_marker(REPO_ROOT)
     try:
         marker.unlink()
@@ -463,22 +506,22 @@ def _ensure_nanovllm_env_pip() -> bool:
             return False
     print("  Upgrading pip in the nanovllm-voxcpm env …")
     _run([str(npy), "-m", "pip", "install", "--upgrade", "pip"])
-    print("  Installing nano-vllm-voxcpm into its env …")
+    print(f"  Installing the Khmer VoxCPM2 runtime ({profile}) into its env …")
     if _run([str(npy), "-m", "pip", "install", "-r",
-             str(BACKEND_DIR / "requirements-nanovllm.txt")]) != 0:
-        print("  ERROR: nano-vllm-voxcpm install failed.")
+             str(nanovllm_requirements_file(profile))]) != 0:
+        print("  ERROR: Khmer VoxCPM2 runtime install failed.")
         return False
-    tag = envdetect.detect_nanovllm_cuda_tag()
     index = envdetect.torch_index_url(tag) if tag else None
     if index:
         print(f"  Installing the CUDA build of torch ({tag}) for GPU …")
         if _run([str(npy), "-m", "pip", "install", "--index-url", index,
-                 "--reinstall", "torch", "torchaudio"]) != 0:
-            print("  WARNING: CUDA torch reinstall failed — leaving default torch in "
-                  "place. nanovllm-voxcpm requires CUDA and will not run.")
+                 "--force-reinstall", "torch", "torchaudio"]) != 0:
+            print("  WARNING: CUDA torch reinstall failed — leaving the default "
+                  "torch in place (the engine will run on CPU).")
+    elif platform.system() == "Darwin":
+        print("  Apple Silicon: using the default torch wheel (MPS-enabled).")
     else:
-        print("  WARNING: no matching torch CUDA build found for this driver — "
-              "nanovllm-voxcpm requires an NVIDIA GPU and will not run on CPU.")
+        print("  No matching torch CUDA build — the engine will run on CPU (slow).")
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("ok\n", encoding="utf-8")

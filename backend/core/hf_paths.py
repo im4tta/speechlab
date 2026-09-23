@@ -24,6 +24,11 @@ def configure_hf_cache(models_dir: Path | str) -> Path:
     models_path = Path(models_dir).expanduser().resolve()
     models_path.mkdir(parents=True, exist_ok=True)
 
+    # Same "before torch is imported" window: on Apple Silicon, let the few
+    # ops MPS doesn't implement yet fall back to CPU instead of raising.
+    # Inherited by every isolated engine worker this process spawns.
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
     # HF_HOME is the umbrella env var; the Hub uses $HF_HOME/hub/ as its
     # cache root. Setting both HF_HOME and HUGGINGFACE_HUB_CACHE makes
     # sure we cover every library version (some old versions only

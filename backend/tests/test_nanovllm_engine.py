@@ -25,7 +25,7 @@ def test_capabilities():
     assert e.supports_style_clone() is True
     assert e.supports_streaming() is False
     assert e.default_cfg_scale() == 2.0
-    assert e.sample_rate() == 16000  # fallback before load()
+    assert e.sample_rate() == 48000  # VoxCPM2 output rate, before load()
 
 
 def test_languages_lead_with_khmer():
@@ -126,3 +126,28 @@ def test_ready_marker_path_matches_venv_layout():
     marker = e._ready_marker()
     assert marker.name == ".nanovllm-ready"
     assert marker.parent.name == "venv-nanovllm"
+
+
+def test_load_msg_defaults_to_auto_runtime_and_omits_unset_sizing():
+    msg = NanoVllmKhmerEngine()._load_msg()
+    assert msg["device"] == "auto"
+    assert msg["backend"] == "auto"
+    for key in ("max_num_seqs", "gpu_memory_utilization", "max_model_len", "enforce_eager"):
+        assert key not in msg  # None = let the worker size it from VRAM
+
+
+def test_load_msg_forwards_explicit_sizing_and_device():
+    msg = NanoVllmKhmerEngine(
+        max_num_seqs=4, gpu_memory_utilization=0.8, enforce_eager=True,
+        device_request="mps", backend="reference",
+    )._load_msg()
+    assert msg["max_num_seqs"] == 4
+    assert msg["gpu_memory_utilization"] == 0.8
+    assert msg["enforce_eager"] is True
+    assert msg["device"] == "mps" and msg["backend"] == "reference"
+
+
+def test_engine_info_before_load_reports_request():
+    info = NanoVllmKhmerEngine(device_request="auto").engine_info()
+    assert info["device"] == "auto"
+    assert info["runtime"] is None

@@ -299,4 +299,7 @@ export interface SystemStats {
   vram: MemStat | null;
   disk: MemStat;
   cache_bytes: number;
+  /** Best local accelerator. "mps" = Apple Silicon (unified memory: `ram` is
+   *  the model budget). Absent on older backends. */
+  accelerator?: "cuda" | "mps" | "cpu";
 }

@@ -22,3 +22,13 @@ def _isolate_cache_dir(tmp_path, monkeypatch):
     """Point the synthesis cache at a throwaway per-test directory."""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_friendly_default_engine(monkeypatch):
+    """Tests drive the stubbed in-process VibeVoice model. This fork's shipped
+    default is `nanovllm_km` (an isolated-venv worker that isn't installed in
+    CI), so pin the default back for the suite. Tests that care about the
+    engine choice pass `default_engine=` explicitly."""
+    monkeypatch.setenv("DEFAULT_ENGINE", "vibevoice")
+    yield

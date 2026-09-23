@@ -22,7 +22,7 @@ and a YouTube scribe that transcribes videos (captions or ASR) with history.
 - **8 TTS engines, switchable in the UI** (only one loads at a time to keep memory low):
   | Engine | Notes |
   |---|---|
-  | **VoxCPM2 on nanovllm** (`nanovllm_km`, default) | 2B tokenizer-free TTS via [nano-vllm-voxcpm](https://github.com/GeeeekExplorer/nano-vllm) concurrent batching, Khmer number/symbol normalization + cluster-safe chunking. **Requires NVIDIA GPU.** |
+  | **VoxCPM2 · Khmer** (`nanovllm_km`, default) | 2B tokenizer-free TTS tuned for Khmer: spoken-form normalization (numbers glued to words, ៗ, dates, times, money, units, phone numbers), cluster-safe chunking, one consistent voice across chunks, seamless joins. Concurrent batching via [nano-vllm-voxcpm](https://github.com/a710128/nanovllm-voxcpm) on NVIDIA GPUs; **runs on Apple Silicon, CPU and small GPUs** via the reference VoxCPM2 runtime. |
   | **VoxCPM2** (`voxcpm`) | Same checkpoint on the reference PyTorch runtime; **auto CPU-offload** on GPUs < 7.5 GB so it still works (slowly) on small cards. |
   | **VibeVoice-1.5B** | Microsoft's voice-cloning model, up to 4 speakers. |
   | **Kokoro-82M** | Fast, lightweight, built-in voices. |
@@ -56,7 +56,8 @@ and a YouTube scribe that transcribes videos (captions or ASR) with history.
 - **Node.js 18+**
 - **Disk** for model weights (auto-downloaded on first use): Kitten ~79 MB · Kokoro
   ~350 MB · Whisper ~1.6 GB · VoxCPM2 ~5 GB · VibeVoice ~5.4 GB · Qwen ~3.5 GB …
-- **NVIDIA GPU + CUDA ≥ 12** for `nanovllm_km` only — every other engine falls back to CPU/MPS.
+- **GPU optional.** NVIDIA (CUDA ≥ 12.6, RTX 30xx+ with 6 GB+) gets the fast concurrent
+  Khmer path; **Apple Silicon Macs use the GPU via MPS**; everything else runs on CPU.
 - **`ffmpeg`** (some audio I/O, and YouTube audio) and **`yt-dlp`** (YouTube scribe).
   `python studio.py setup` checks for them and prints the install command for your OS.
 
@@ -81,16 +82,42 @@ React/Vite app (`cd frontend && npm install && npm run dev`).
 Install from the app (engine menu → **Install**) or:
 
 ```bash
-python studio.py install-nanovllm     # requires NVIDIA GPU + CUDA ≥ 12
+python studio.py install-nanovllm     # picks the right runtime for this machine
 ```
 
-- Needs **flash-attn**, which usually isn't on PyPI — if the engine fails to load with a
-  flash-attn import error, install a prebuilt wheel matching your torch/CUDA/Python into
-  `backend/venv-nanovllm` (see `backend/requirements-nanovllm.txt`).
-- First load downloads the VoxCPM2 checkpoint (~5 GB) and compiles CUDA graphs (minutes).
+The installer detects your hardware and installs one of two runtimes (force one with
+`NANOVLLM_INSTALL_PROFILE=full|lite`):
 
-**No NVIDIA GPU?** Use the plain **VoxCPM2** (`voxcpm`) engine — it runs via CPU-offload
-on small cards (slow but works), or point it at a local model folder:
+| Machine | Runtime | How long text is generated |
+| --- | --- | --- |
+| NVIDIA RTX 30xx/40xx/50xx, A-series… with **≥ 6 GB** and a CUDA 12.6+ driver | **full**: nano-vllm-voxcpm + reference fallback | chunks **in parallel**; pool sized to your VRAM (20 GB+ / 12 GB+ / 8 GB+ / 6 GB tiers, stepping down automatically if a load runs out of memory) |
+| **Apple Silicon Mac** (M1–M4) | **lite**: reference VoxCPM2 on **MPS** (float32) | one chunk at a time |
+| Older NVIDIA (GTX 16xx, RTX 20xx, T4 — no flash-attn) or < 6 GB | **lite**: reference VoxCPM2 on CUDA (≥ 7.5 GB) or CPU | one chunk at a time |
+| No GPU | **lite**: reference VoxCPM2 on CPU | one chunk at a time (slow) |
+
+Both runtimes share the same Khmer pipeline, so output quality is the same; only speed
+differs. The engine picks at load time and reports the runtime + device in the UI.
+
+- The full profile needs **flash-attn**, which usually isn't on PyPI. If it's missing the
+  engine **still works** on the reference runtime; for the parallel fast path install a
+  prebuilt wheel matching your torch/CUDA/Python into `backend/venv-nanovllm`.
+- First load downloads the VoxCPM2 checkpoint (~5 GB); on nanovllm it also compiles CUDA
+  graphs (minutes; skipped on ≤ 8 GB cards to save VRAM).
+- Tuning (`backend/.env`): `NANOVLLM_BACKEND=auto|nanovllm|reference`,
+  `NANOVLLM_MAX_NUM_SEQS`, `NANOVLLM_GPU_MEMORY_UTILIZATION`, `NANOVLLM_MAX_MODEL_LEN`,
+  `NANOVLLM_ENFORCE_EAGER`, `NANOVLLM_CHUNK_MAX_CHARS` — leave the sizing ones unset to
+  auto-size from VRAM.
+
+**Mac quick start:** `python3 studio.py setup` (installs the MPS-enabled PyTorch), then
+`python3 studio.py install-nanovllm` and `python3 studio.py start`. A 16 GB+ Mac is
+comfortable for the 2B model; on 8 GB close other apps first.
+
+**Khmer text tips.** You can type naturally — `ឆ្នាំ២០២៤`, `$12.50`, `10,000៛`, `8:30`,
+`012 345 678`, `ផ្សេងៗ`, `។ល។` are all spoken correctly. Start the text with `(style)` —
+e.g. `(សំឡេងស្ត្រី ស្ងប់ស្ងាត់)` — to apply a voice style to the whole passage.
+
+The plain **VoxCPM2** (`voxcpm`) engine runs the same Khmer pipeline on the reference
+runtime too, and either engine can load from a local model folder:
 
 ```bash
 python studio.py start --voxcpm-model-path "C:\path\to\your\VoxCPM2"
@@ -158,9 +185,13 @@ Base URL `http://localhost:8880/api`. Main routes:
 - **Concurrent synthesis serializes** on a single GPU lock.
 - **Windows**: install a CUDA-matched PyTorch wheel before `pip install -r backend/requirements.txt`,
   or CUDA silently falls back to CPU.
-- **Small GPUs**: `nanovllm_km` and VoxCPM2 need ~8 GB VRAM for GPU speed. VoxCPM2 falls
-  back to CPU-offload below that; Kokoro / Kitten / VibeVoice (fp16) fit smaller cards —
-  the app's **hardware recommendations** panel tells you what fits your GPU.
+- **Small GPUs**: `nanovllm_km` auto-sizes nanovllm for 6–8 GB cards; below that (or on
+  pre-Ampere cards) it and VoxCPM2 run the 2B model on CPU. Kokoro / Kitten / VibeVoice
+  (fp16) fit smaller cards — the app's **hardware recommendations** panel tells you what
+  fits your GPU (or your Mac's unified memory).
+- **macOS / Apple Silicon**: every engine uses the Apple GPU via MPS (`--device auto`,
+  the default); ops MPS doesn't implement yet fall back to CPU automatically
+  (`PYTORCH_ENABLE_MPS_FALLBACK=1` is set for you).
 - **espeak-ng** is required by Kokoro (silent audio without it); **ffmpeg** + **yt-dlp**
   are required for the YouTube scribe audio path.
 

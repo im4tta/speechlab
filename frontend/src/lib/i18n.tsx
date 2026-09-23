@@ -61,6 +61,7 @@ const EN: Record<string, string> = {
   // recommendation card
   "rec.title.gpu": "Pick a model for your {n} GB GPU",
   "rec.title.noGpu": "Pick a model for your hardware",
+  "rec.title.mac": "Pick a model for your Mac ({n} GB unified memory)",
   "rec.loading": "Reading your hardware…",
   // voice picker
   "voice.title": "Voices",
@@ -163,6 +164,7 @@ const KM: Record<string, string> = {
   "controls.refresh": "ធ្វើបញ្ជីឡើងវិញ",
   "rec.title.gpu": "ជ្រើសគំរូសម្រាប់ GPU {n} GB របស់អ្នក",
   "rec.title.noGpu": "ជ្រើសគំរូសម្រាប់ម៉ាស៊ីនរបស់អ្នក",
+  "rec.title.mac": "ជ្រើសគំរូសម្រាប់ Mac របស់អ្នក (អង្គចងចាំរួម {n} GB)",
   "rec.loading": "កំពុងអានផ្នែករឹង…",
   "voice.title": "សំឡេង",
   "voice.builtin": "សំឡេងស្រាប់",

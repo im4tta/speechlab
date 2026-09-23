@@ -425,3 +425,37 @@ def test_no_music_engine_registered():
     from backend.services.model_download import DOWNLOADABLE
     assert "musicgen" not in dm.MODEL_CATALOG
     assert "musicgen" not in DOWNLOADABLE
+
+
+# ─── nanovllm (Khmer) install profile ────────────────────────────────────────
+
+def test_parse_nvidia_gpu_query():
+    gpu = envdetect.parse_nvidia_gpu_query("NVIDIA GeForce RTX 3060, 12288, 8.6\n")
+    assert gpu == {"name": "NVIDIA GeForce RTX 3060", "vram_gb": 12.0, "compute_capability": (8, 6)}
+    old = envdetect.parse_nvidia_gpu_query("Tesla T4, 15360, [N/A]")
+    assert old["compute_capability"] is None and old["vram_gb"] == 15.0
+    assert envdetect.parse_nvidia_gpu_query("") is None
+    assert envdetect.parse_nvidia_gpu_query(None) is None
+
+
+def test_nanovllm_install_profile():
+    ampere = {"name": "RTX 3060", "vram_gb": 12.0, "compute_capability": (8, 6)}
+    turing = {"name": "RTX 2080", "vram_gb": 8.0, "compute_capability": (7, 5)}
+    tiny = {"name": "RTX 3050 4GB", "vram_gb": 4.0, "compute_capability": (8, 6)}
+    assert envdetect.nanovllm_install_profile("cu128", ampere)[0] == "full"
+    assert envdetect.nanovllm_install_profile("cu128", None)[0] == "full"  # unknown details
+    assert envdetect.nanovllm_install_profile("cu128", turing)[0] == "lite"
+    assert envdetect.nanovllm_install_profile("cu128", tiny)[0] == "lite"
+    assert envdetect.nanovllm_install_profile(None, None)[0] == "lite"      # Mac / CPU
+    assert envdetect.nanovllm_install_profile(None, ampere)[0] == "lite"    # driver < 12.6
+    assert envdetect.nanovllm_install_profile(None, None, "full")[0] == "full"
+
+
+def test_nanovllm_requirement_files_exist_and_differ():
+    full = studio.nanovllm_requirements_file("full")
+    lite = studio.nanovllm_requirements_file("lite")
+    assert full.is_file() and lite.is_file()
+    full_txt, lite_txt = full.read_text(), lite.read_text()
+    assert "nano-vllm-voxcpm" in full_txt and "voxcpm" in full_txt
+    lite_reqs = [ln for ln in lite_txt.splitlines() if ln and not ln.startswith("#")]
+    assert not any("nano-vllm" in ln or "flash" in ln for ln in lite_reqs)

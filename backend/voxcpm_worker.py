@@ -6,28 +6,43 @@ Speaks newline-delimited JSON on stdin/stdout. The parent process
 logging goes to STDERR so it never corrupts the stdout protocol.
 
 Protocol (one JSON object per line):
-  stdin  {"op":"load","device":"cuda","model_id":"openbmb/VoxCPM2"}
+  stdin  {"op":"load","device":"auto|cuda|mps|cpu","model_id":"openbmb/VoxCPM2"}
          {"op":"synth","mode":"clone|design|auto","text":..,"out_wav":<path>,
           "ref_audio":<path?>,"prompt_text":<str?>,"instruct":<str?>,
-          "cfg_value":<float?>,"inference_timesteps":<int?>}
+          "cfg_value":<float?>,"inference_timesteps":<int?>,"seed":<int?>,
+          "chunk_max_chars":<int?>,"khmer_normalize":<bool?>,
+          "anchor_voice":<bool?>}
          {"op":"shutdown"}
-  stdout {"ok":true}                                            (load)
-         {"ok":true,"sample_rate":48000,"duration_sec":..,"inference_ms":..}  (synth)
-         {"ok":false,"error":".."}                             (any failure)
+  stdout {"ok":true,"device":..,"device_mode":..,"dtype":..,"vram_gb":..}  (load)
+         {"ok":true,"sample_rate":48000,"duration_sec":..,"inference_ms":..,
+          "n_chunks":..}                                                  (synth)
+         {"progress":{..}}                                                (any time)
+         {"ok":false,"error":".."}                                        (any failure)
 
 VoxCPM expresses voice DESIGN and STYLE STEERING inline as a "(...)" prefix in
 the text (NOT a separate argument), so this worker composes the prefixed text.
-The generated audio is written to out_wav (16-bit PCM mono WAV at 48 kHz); only
+Long text (and all Khmer text) goes through the shared chunked pipeline in
+core/voxcpm_pipeline.py — Khmer normalization, sentence chunking, voice
+anchoring across chunks and seamless joining — run sequentially here. The
+generated audio is written to out_wav (16-bit PCM mono WAV at 48 kHz); only
 metadata travels over the pipe.
+
+Device selection (auto): a CUDA GPU with enough VRAM, else Apple Silicon MPS,
+else CPU. voxcpm >= 2.0 takes the device explicitly and forces float32 on MPS.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 import time
 import wave
+from pathlib import Path
+
+# Let unsupported MPS ops fall back to CPU instead of crashing (Apple Silicon).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 # Protocol output. main() replaces this with the REAL stdout and points fd 1
 # (Python AND C-level) at stderr, so model-load/tqdm noise can't corrupt the
@@ -35,6 +50,16 @@ import wave
 _OUT = sys.stdout
 
 _DEFAULT_SAMPLE_RATE = 48000
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from core.voxcpm_pipeline import (  # noqa: E402
+    ReferenceBackend,
+    build_plan,
+    default_progress_writer,
+    load_reference_model,
+    synthesize_plan,
+)
+from core.voxcpm_runtime import REFERENCE_MIN_VRAM_GB, probe_hardware, reference_device  # noqa: E402
 
 
 def _log(msg: str) -> None:
@@ -63,49 +88,26 @@ def _write_wav_int16(path: str, samples, sample_rate: int) -> None:
         w.writeframes(arr.tobytes())
 
 
-def _norm_device(device: str | None) -> str:
-    d = (device or "auto").lower()
-    if d == "auto":
-        # The worker holds the torch that actually runs the model, so it is the
-        # authority on CUDA availability. Fall back to CPU on GPU-less hosts
-        # instead of forcing cuda. (VoxCPM auto-selects its own device, so this
-        # is mainly for honest reporting.)
-        try:
-            import torch
-            d = "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:  # noqa: BLE001
-            d = "cpu"
-    return d  # cuda, cpu, mps
+#: Kept for backwards compatibility with callers/tests; the real threshold
+#: lives in core/voxcpm_runtime.py.
+_GPU_VRAM_GB_THRESHOLD = REFERENCE_MIN_VRAM_GB
 
 
-#: VRAM threshold (GB) below which VoxCPM2's 2B weights + KV cache don't fit
-#: comfortably on the GPU, so we fall back to CPU-offload. Mirrors the user's
-#: standalone voxkhtts project (tts_engine.get_device_config).
-_GPU_VRAM_GB_THRESHOLD = 7.5
+def _resolve_device_config(requested: str | None = "auto") -> tuple[str, str, float | None]:
+    """Pick (device, device_mode, vram_gb).
 
-
-def _resolve_device_config() -> tuple[str, str, float | None]:
-    """Pick (device_mode, dtype_label, vram_gb) the way voxkhtts does.
-
-    CUDA + >= 7.5 GB VRAM  -> "cuda"       (GPU, fast)
-    CUDA + less            -> "cpu_offload" (VOXCPM_DEVICE=cpu — works, slow)
-    no CUDA                -> "cpu"         (CPU only)
-    """
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            if vram_gb >= _GPU_VRAM_GB_THRESHOLD:
-                return "cuda", "float16", vram_gb
-            return "cpu_offload", "float32", vram_gb
-    except Exception:  # noqa: BLE001
-        pass
-    return "cpu", "float32", None
+    device_mode is "cuda" | "mps" | "cpu" | "cpu_offload" — the last meaning a
+    CUDA GPU exists but is too small for VoxCPM2, so the model runs on CPU."""
+    hw = probe_hardware()
+    device = reference_device(hw, requested)
+    mode = device
+    if device == "cpu" and hw.cuda:
+        mode = "cpu_offload"
+    return device, mode, hw.vram_gb
 
 
 def _build_generate_kwargs(req: dict) -> tuple[dict, str]:
-    """Translate a synth request into voxcpm.generate(**kwargs).
+    """Translate a single-chunk synth request into voxcpm.generate(**kwargs).
 
     Dispatch table (mode, has_ref, has_style, has_transcript):
       auto              -> generate(text)
@@ -114,7 +116,8 @@ def _build_generate_kwargs(req: dict) -> tuple[dict, str]:
       controllable      -> generate("(style)text", reference_wav_path=ref)
       ultimate          -> generate(text, prompt_wav_path=ref, prompt_text=tr,
                                     reference_wav_path=ref)
-    An empty design style downgrades to auto.
+    An empty design style downgrades to auto. (Multi-chunk requests go through
+    core.voxcpm_pipeline, which applies the same table per chunk.)
     """
     text = (req.get("text") or "").strip()
     mode = req.get("mode") or "auto"
@@ -148,6 +151,7 @@ def _build_generate_kwargs(req: dict) -> tuple[dict, str]:
 class _Worker:
     def __init__(self) -> None:
         self._model = None
+        self._device = "cpu"
         self._sample_rate = _DEFAULT_SAMPLE_RATE
 
     def handle(self, req: dict) -> dict:
@@ -161,82 +165,87 @@ class _Worker:
         return {"ok": False, "error": f"unknown op: {op!r}"}
 
     def _load(self, req: dict) -> dict:
-        device = _norm_device(req.get("device"))
         model_id = req.get("model_id") or "openbmb/VoxCPM2"
         try:
-            from voxcpm import VoxCPM
+            import voxcpm  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"import voxcpm failed: {exc}"}
-        device_mode, dtype, vram_gb = _resolve_device_config()
-        if device_mode in ("cpu_offload", "cpu"):
-            # VoxCPM reads VOXCPM_DEVICE at load time (same mechanism as the
-            # standalone voxkhtts project). Keeps the 2B model in CPU RAM +
-            # float32 when the GPU is too small — slower, but it actually runs.
-            os.environ.setdefault("VOXCPM_DEVICE", "cpu")
-        _reply({"progress": {"stage": f"Loading model from {model_id}…"}})
+        device, device_mode, vram_gb = _resolve_device_config(req.get("device"))
+        _reply({"progress": {"stage": f"Loading model from {model_id} on {device}…"}})
         try:
-            self._model = VoxCPM.from_pretrained(model_id, load_denoiser=False)
-            if device_mode == "cuda":
-                self._model = self._model.to("cuda")
+            self._model = load_reference_model(model_id, device, _log)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"load failed: {exc}"}
         _reply({"progress": {"stage": "Model ready", "done": 1, "total": 1}})
-        # Read the model's real output sample rate if exposed; else keep 48k.
+        self._device = device
         try:
             sr = int(self._model.tts_model.sample_rate)
             if sr > 0:
                 self._sample_rate = sr
         except Exception:  # noqa: BLE001
             pass
+        dtype = "float32" if device == "mps" else None
+        try:
+            dtype = str(self._model.tts_model.config.dtype)
+        except Exception:  # noqa: BLE001
+            pass
         _log(
-            f"[voxcpm-worker] model loaded (requested device={device!r} → "
-            f"mode={device_mode} dtype={dtype}), sr={self._sample_rate}"
+            f"[voxcpm-worker] model loaded (requested device={req.get('device')!r} → "
+            f"{device}, mode={device_mode}, dtype={dtype}), sr={self._sample_rate}"
         )
         return {
             "ok": True,
-            "device": "cuda" if device_mode == "cuda" else "cpu",
+            "device": device,
             "device_mode": device_mode,
-            "dtype": dtype,
+            "dtype": dtype or "bfloat16",
             "vram_gb": vram_gb,
         }
 
     def _synth(self, req: dict) -> dict:
         if self._model is None:
             return {"ok": False, "error": "model not loaded"}
-        text = (req.get("text") or "").strip()
         out_wav = req.get("out_wav")
-        if not text:
+        if not (req.get("text") or "").strip():
             return {"ok": False, "error": "text must be non-empty"}
         if not out_wav:
             return {"ok": False, "error": "out_wav required"}
         try:
-            kwargs, _mode = _build_generate_kwargs(req)
+            plan = build_plan(req)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        backend = ReferenceBackend(self._model, device=self._device,
+                                   inference_timesteps=int(req.get("inference_timesteps") or 10))
+        self._sample_rate = backend.sample_rate or self._sample_rate
+        gen = {k: req[k] for k in ("cfg_value", "inference_timesteps", "seed") if req.get(k) is not None}
         t0 = time.perf_counter()
         _reply({"progress": {"stage": "Synthesizing…"}})
         try:
-            audio = self._model.generate(**kwargs)
+            full, stats = asyncio.run(
+                synthesize_plan(
+                    backend,
+                    plan,
+                    gen=gen,
+                    ref_audio=req.get("ref_audio"),
+                    prompt_text=req.get("prompt_text"),
+                    anchor_voice=bool(req.get("anchor_voice", True)),
+                    retries=int(req.get("retries", 1)),
+                    progress=default_progress_writer(_reply) if len(plan.bodies) > 1 else None,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"generate failed: {exc}"}
         inference_ms = int((time.perf_counter() - t0) * 1000)
         _reply({"progress": {"stage": "Writing audio…"}})
-
-        import numpy as np
-
-        arr = audio[0] if isinstance(audio, (list, tuple)) else audio
-        if hasattr(arr, "detach"):
-            arr = arr.detach().cpu().float().numpy()
-        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
         try:
-            _write_wav_int16(out_wav, arr, self._sample_rate)
+            _write_wav_int16(out_wav, full, self._sample_rate)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"write wav failed: {exc}"}
         return {
             "ok": True,
             "sample_rate": self._sample_rate,
-            "duration_sec": float(arr.size) / float(self._sample_rate),
+            "duration_sec": float(full.size) / float(self._sample_rate),
             "inference_ms": inference_ms,
+            "n_chunks": stats.n_chunks,
         }
 
 

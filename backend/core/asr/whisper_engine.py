@@ -170,9 +170,15 @@ class WhisperEngine(AsrEngine):
     def _device(self) -> str:
         import torch
 
-        if self._device_request == "cpu":
+        req = (self._device_request or "auto").lower()
+        if req == "cpu":
             return "cpu"
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available() and req in ("auto", "cuda"):
+            return "cuda"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available() and req in ("auto", "mps", "cuda"):
+            return "mps"  # Apple Silicon
+        return "cpu"
 
     def load(self) -> None:
         if self._model is not None:
@@ -181,7 +187,8 @@ class WhisperEngine(AsrEngine):
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
         device = self._device()
-        dtype = torch.float16 if device == "cuda" else torch.float32
+        # fp16 on GPUs (CUDA and Apple MPS both run Whisper well in half).
+        dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
         t0 = time.perf_counter()
 
         self._processor = AutoProcessor.from_pretrained(self._model_id)

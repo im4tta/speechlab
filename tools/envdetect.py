@@ -159,3 +159,90 @@ def detect_nanovllm_cuda_tag(runner=None) -> str | None:
     if text is None:
         return None
     return cuda_version_to_nanovllm_tag(parse_nvidia_smi_cuda_version(text))
+
+
+# ─── NVIDIA GPU details + nanovllm (Khmer) install profile ─────────────────
+
+def _run_nvidia_smi_query() -> str | None:
+    if shutil.which("nvidia-smi") is None:
+        return None
+    # Drivers older than ~510 reject the compute_cap field — retry without it.
+    for fields in ("name,memory.total,compute_cap", "name,memory.total"):
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout
+    return None
+
+
+def parse_nvidia_gpu_query(text: str | None) -> dict | None:
+    """Parse the first line of
+    `nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits`
+    into {"name", "vram_gb", "compute_capability": (major, minor) | None}.
+
+    Older drivers don't know `compute_cap` (the field comes back as
+    "[N/A]" or the whole query fails) — that just leaves it None."""
+    if not text:
+        return None
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 2:
+        return None
+    try:
+        vram_gb = round(float(parts[1]) / 1024.0, 1)  # MiB -> GiB
+    except ValueError:
+        return None
+    cc = None
+    if len(parts) >= 3:
+        m = re.fullmatch(r"(\d+)\.(\d+)", parts[2])
+        if m:
+            cc = (int(m.group(1)), int(m.group(2)))
+    return {"name": parts[0], "vram_gb": vram_gb, "compute_capability": cc}
+
+
+def detect_nvidia_gpu(runner=None) -> dict | None:
+    """Name / VRAM / compute capability of GPU 0, or None. `runner` is injectable."""
+    run = runner or _run_nvidia_smi_query
+    return parse_nvidia_gpu_query(run())
+
+
+#: flash-attn 2 (required by nano-vllm-voxcpm) needs Ampere (sm80) or newer,
+#: and VoxCPM2 + a usable KV cache need ~6 GB. Mirrors
+#: backend/core/voxcpm_runtime.py, which makes the same call at runtime.
+NANOVLLM_MIN_COMPUTE_CAPABILITY = (8, 0)
+NANOVLLM_MIN_VRAM_GB = 6.0
+
+
+def nanovllm_install_profile(cuda_tag: str | None, gpu: dict | None,
+                             override: str | None = None) -> tuple[str, str]:
+    """Which runtime to install into backend/venv-nanovllm.
+
+    "full" = nano-vllm-voxcpm (+ flash-attn) AND the reference voxcpm runtime
+             as an automatic fallback — for NVIDIA Ampere+ GPUs with ≥ 6 GB
+             and a CUDA 12.6+ driver.
+    "lite" = only the reference voxcpm runtime — Apple Silicon (MPS), CPU-only
+             machines, and older/smaller NVIDIA GPUs. flash-attn can't be
+             built/used there, so installing nanovllm would just fail.
+    Returns (profile, human-readable reason). `override` ("full"/"lite",
+    e.g. from NANOVLLM_INSTALL_PROFILE) wins.
+    """
+    if override in ("full", "lite"):
+        return override, f"forced by NANOVLLM_INSTALL_PROFILE={override}"
+    if not cuda_tag:
+        if gpu:
+            return "lite", "NVIDIA driver is older than CUDA 12.6 (nanovllm needs torch 2.8 cu126/cu128)"
+        return "lite", "no NVIDIA GPU (Apple Silicon / CPU) — using the reference VoxCPM2 runtime"
+    if gpu:
+        cc = gpu.get("compute_capability")
+        if cc is not None and tuple(cc) < NANOVLLM_MIN_COMPUTE_CAPABILITY:
+            return "lite", (f"{gpu.get('name', 'GPU')} is compute capability {cc[0]}.{cc[1]}; "
+                            "flash-attn needs 8.0+ (RTX 30xx / A-series or newer)")
+        vram = gpu.get("vram_gb")
+        if vram is not None and vram < NANOVLLM_MIN_VRAM_GB:
+            return "lite", f"{gpu.get('name', 'GPU')} has {vram} GB VRAM; nanovllm needs ≥ 6 GB"
+    return "full", "NVIDIA GPU supports nanovllm (reference runtime installed as fallback)"
