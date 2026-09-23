@@ -111,6 +111,10 @@ class Engine(abc.ABC):
     license: str = "unknown"
     #: Canonical Hugging Face model page (license + usage policy live there).
     model_url: str = ""
+    #: Bump when the engine's output for the *same* request changes (e.g. a
+    #: better text pipeline), so the synthesis cache stops serving stale audio.
+    #: None (the default) leaves existing cache keys untouched.
+    cache_revision: str | None = None
 
     @abc.abstractmethod
     def load(self) -> None:

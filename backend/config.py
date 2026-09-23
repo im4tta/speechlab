@@ -73,16 +73,28 @@ class Settings(BaseSettings):
 
     # --- nanovllm-voxcpm (Khmer) ---
     # Same VoxCPM2 checkpoint as `voxcpm`, served through nanovllm's
-    # concurrent-batching runtime. Requires an NVIDIA GPU.
+    # concurrent-batching runtime on NVIDIA GPUs (Ampere+, 6 GB+). On Apple
+    # Silicon, CPU, or smaller/older GPUs the engine falls back to the
+    # reference VoxCPM2 runtime with the same Khmer pipeline.
     nanovllm_model_id: str = "openbmb/VoxCPM2"
+    # Which runtime to use: "auto" (nanovllm when the GPU supports it, else
+    # reference), "nanovllm" (fail instead of falling back), or "reference".
+    nanovllm_backend: Literal["auto", "nanovllm", "reference"] = "auto"
     # GPU device indices for the nanovllm server pool (one worker per index).
     nanovllm_devices: list[int] = [0]
     # Diffusion inference timesteps (5 fast … 25 high quality). Default 10.
     nanovllm_inference_timesteps: int = 10
+    # nanovllm pool sizing. Leave unset (None) to size automatically from the
+    # GPU's VRAM — 20 GB+/12 GB+/8 GB+/smaller tiers, stepping down if a load
+    # runs out of memory (core/voxcpm_runtime.py). Set any of these to pin it.
     # Fraction of GPU memory nanovllm is allowed to claim for weights + KV cache.
-    nanovllm_gpu_memory_utilization: float = 0.9
+    nanovllm_gpu_memory_utilization: float | None = None
     # Max concurrent in-flight sequences per device.
-    nanovllm_max_num_seqs: int = 16
+    nanovllm_max_num_seqs: int | None = None
+    # Context length per sequence (prompt + generated audio).
+    nanovllm_max_model_len: int | None = None
+    # Skip CUDA-graph capture (saves VRAM on small GPUs, slightly slower).
+    nanovllm_enforce_eager: bool | None = None
     # Target chunk size (characters) for Khmer-aware text splitting — longer
     # passages are split into this many characters per chunk and generated
     # concurrently. See core/khmer_text.py.

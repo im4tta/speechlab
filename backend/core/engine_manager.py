@@ -77,9 +77,12 @@ class EngineManager:
         nanovllm_model_id: str = "openbmb/VoxCPM2",
         nanovllm_devices: list[int] | None = None,
         nanovllm_inference_timesteps: int = 10,
-        nanovllm_gpu_memory_utilization: float = 0.9,
-        nanovllm_max_num_seqs: int = 16,
+        nanovllm_gpu_memory_utilization: float | None = None,
+        nanovllm_max_num_seqs: int | None = None,
+        nanovllm_max_model_len: int | None = None,
+        nanovllm_enforce_eager: bool | None = None,
         nanovllm_chunk_max_chars: int = 220,
+        nanovllm_backend: str = "auto",
         state_dir: Path | None = None,
     ) -> None:
         self._voices_dir = Path(voices_dir)
@@ -135,7 +138,11 @@ class EngineManager:
                 inference_timesteps=nanovllm_inference_timesteps,
                 gpu_memory_utilization=nanovllm_gpu_memory_utilization,
                 max_num_seqs=nanovllm_max_num_seqs,
+                max_model_len=nanovllm_max_model_len,
+                enforce_eager=nanovllm_enforce_eager,
                 chunk_max_chars=nanovllm_chunk_max_chars,
+                device_request=device_request,
+                backend=nanovllm_backend,
             ),
         }
 

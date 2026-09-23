@@ -27,6 +27,9 @@ import sys
 import time
 import wave
 
+# Let unsupported MPS ops fall back to CPU instead of crashing (Apple Silicon).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 # Protocol output. main() replaces this with the REAL stdout and points fd 1
 # (Python AND C-level) at stderr, so model-load/tqdm noise can't corrupt the
 # newline-delimited JSON the parent reads.
@@ -63,11 +66,16 @@ def _norm_device(device: str | None) -> str:
     d = (device or "auto").lower()
     if d == "auto":
         # The worker holds the torch that actually runs the model, so it is the
-        # authority on CUDA availability. Fall back to CPU on GPU-less hosts
-        # instead of forcing cuda and crashing.
+        # authority on what's available: CUDA, then Apple Silicon (MPS), then
+        # CPU — never force cuda and crash on a GPU-less host or a Mac.
         try:
             import torch
-            d = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                d = "cuda"
+            elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                d = "mps"
+            else:
+                d = "cpu"
         except Exception:  # noqa: BLE001
             d = "cpu"
     if d == "cuda":
@@ -101,7 +109,15 @@ class _Worker:
         try:
             self._model = OmniVoice.from_pretrained(model_id, device_map=device)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"load failed: {exc}"}
+            if device != "mps":
+                return {"ok": False, "error": f"load failed: {exc}"}
+            # Some ops/kernels aren't implemented on MPS yet — run on CPU.
+            _log(f"[omnivoice-worker] MPS load failed ({exc}); retrying on CPU")
+            device = "cpu"
+            try:
+                self._model = OmniVoice.from_pretrained(model_id, device_map=device)
+            except Exception as exc2:  # noqa: BLE001
+                return {"ok": False, "error": f"load failed: {exc2}"}
         _log(f"[omnivoice-worker] model loaded on {device}")
         return {"ok": True, "device": device}
 

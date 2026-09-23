@@ -49,6 +49,9 @@ class SystemStatsResponse(BaseModel):
     vram: MemStat | None = None  # null when no CUDA device
     disk: MemStat
     cache_bytes: int
+    # Best local accelerator: "cuda" (NVIDIA), "mps" (Apple Silicon — unified
+    # memory, so `ram` is the model budget), or "cpu".
+    accelerator: Literal["cuda", "mps", "cpu"] = "cpu"
 
 
 # ---- voices ----

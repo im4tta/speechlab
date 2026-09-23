@@ -1,4 +1,12 @@
+# "full" profile of the Khmer VoxCPM2 engine (nanovllm_km) — NVIDIA Ampere+
+# GPUs with >= 6 GB VRAM. studio.py picks this or requirements-nanovllm-lite.txt
+# per machine (tools/envdetect.py::nanovllm_install_profile); force one with
+# NANOVLLM_INSTALL_PROFILE=full|lite.
 nano-vllm-voxcpm
+# Reference VoxCPM2 runtime, installed alongside as an automatic fallback: if
+# flash-attn is missing or nanovllm can't fit/load, the worker runs the same
+# Khmer pipeline on this instead (see backend/nanovllm_worker.py).
+voxcpm>=2.0
 soundfile
 numpy
 # torch + torchaudio are installed separately by studio.py with a CUDA-matched
@@ -12,4 +20,5 @@ numpy
 # install a matching wheel by hand (or build from source, which needs the
 # NVIDIA CUDA Toolkit with nvcc on PATH). Windows: automated flash-attn
 # compilation is skipped by nano-vllm-voxcpm's own setup step — see its
-# README's Windows note.
+# README's Windows note. Without flash-attn the engine still works on the
+# reference runtime above, just one chunk at a time.

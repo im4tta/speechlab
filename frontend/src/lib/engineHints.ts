@@ -134,7 +134,7 @@ const NANOVLLM_KM_HINTS: EngineCfgHints = {
   ...VOXCPM_HINTS,
   name: "nanovllm_km",
   hint:
-    "VoxCPM2 CFG (cfg_value), served via nanovllm. Long Khmer text is automatically split into sentence-safe chunks and generated concurrently for much faster throughput than the plain VoxCPM engine. Higher adheres more strictly to the reference voice or design prompt.",
+    "VoxCPM2 CFG (cfg_value), tuned for Khmer. Numbers, dates, times, money and ៗ are spelled out, long text is split into sentence-safe chunks that keep one voice throughout, and on an NVIDIA GPU the chunks are generated concurrently (Macs and smaller GPUs run the same pipeline one chunk at a time). Higher adheres more strictly to the reference voice or design prompt.",
   highlight: "concurrently",
 };
 

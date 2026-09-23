@@ -57,7 +57,14 @@ class M2M100Translator(Translator):
         from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
         self._tok = M2M100Tokenizer.from_pretrained(self._model_id)
         self._model = M2M100ForConditionalGeneration.from_pretrained(self._model_id)
-        self._device = "cuda" if (self._device_request in ("auto", "cuda") and torch.cuda.is_available()) else "cpu"
+        req = (self._device_request or "auto").lower()
+        mps = getattr(torch.backends, "mps", None)
+        if req in ("auto", "cuda") and torch.cuda.is_available():
+            self._device = "cuda"
+        elif req in ("auto", "mps") and mps is not None and mps.is_available():
+            self._device = "mps"  # Apple Silicon
+        else:
+            self._device = "cpu"
         self._model.to(self._device).eval()
         log.info("M2M-100 loaded on %s", self._device)
 

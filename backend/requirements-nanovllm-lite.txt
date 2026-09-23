@@ -1,0 +1,14 @@
+# "lite" profile of the Khmer VoxCPM2 engine (nanovllm_km) — Apple Silicon
+# (MPS), CPU-only machines, and NVIDIA GPUs that can't run nano-vllm-voxcpm
+# (pre-Ampere, < 6 GB VRAM, or a driver older than CUDA 12.6).
+#
+# Only the reference VoxCPM2 PyTorch runtime: nano-vllm-voxcpm hard-requires
+# flash-attn, which needs an Ampere+ NVIDIA GPU and can't even be installed
+# elsewhere. The worker runs the same Khmer pipeline (normalization, chunking,
+# voice anchoring, seamless joins) on this runtime, one chunk at a time.
+voxcpm>=2.0
+soundfile
+numpy
+# torch + torchaudio come from voxcpm's own dependency (the default PyPI wheel
+# is MPS-enabled on macOS); studio.py swaps in a CUDA build when there's an
+# NVIDIA GPU. Do NOT pin torch here.

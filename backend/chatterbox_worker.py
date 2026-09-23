@@ -32,6 +32,9 @@ import wave
 # newline-delimited JSON the parent reads.
 _OUT = sys.stdout
 
+# Let unsupported MPS ops fall back to CPU instead of crashing (Apple Silicon).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
@@ -79,29 +82,42 @@ class _Worker:
         device = (req.get("device") or "auto").lower()
         if device == "auto":
             # The worker holds the torch that actually runs the model, so it is
-            # the authority on CUDA availability. Fall back to CPU on GPU-less
-            # hosts instead of forcing cuda and crashing.
+            # the authority on what's available: CUDA, then Apple Silicon
+            # (MPS), then CPU — never force cuda and crash.
             try:
                 import torch
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    device = "cuda"
+                elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
             except Exception:  # noqa: BLE001
                 device = "cpu"
         try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"import chatterbox failed: {exc}"}
-        try:
+        def _from_pretrained(dev: str):
             try:
-                self._model = ChatterboxMultilingualTTS.from_pretrained(
-                    device=device, t3_model="v3"
-                )
+                return ChatterboxMultilingualTTS.from_pretrained(device=dev, t3_model="v3")
             except TypeError as exc:
                 if "t3_model" in str(exc):
-                    self._model = ChatterboxMultilingualTTS.from_pretrained(device=device)
-                else:
-                    raise
+                    return ChatterboxMultilingualTTS.from_pretrained(device=dev)
+                raise
+
+        try:
+            self._model = _from_pretrained(device)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"load failed: {exc}"}
+            if device != "mps":
+                return {"ok": False, "error": f"load failed: {exc}"}
+            # Some ops/kernels aren't implemented on MPS yet — run on CPU.
+            _log(f"[chatterbox-worker] MPS load failed ({exc}); retrying on CPU")
+            device = "cpu"
+            try:
+                self._model = _from_pretrained(device)
+            except Exception as exc2:  # noqa: BLE001
+                return {"ok": False, "error": f"load failed: {exc2}"}
         _log(f"[chatterbox-worker] model loaded on {device}")
         return {"ok": True, "device": device}
 

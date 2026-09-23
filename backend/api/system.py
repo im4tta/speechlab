@@ -108,6 +108,29 @@ def _vram() -> MemStat | None:
     return None
 
 
+#: MPS availability never changes while the process runs — probe it once.
+_MPS_STATE: dict[str, object] = {"tried": False, "available": False}
+
+
+def _mps_available() -> bool:
+    if not _MPS_STATE["tried"]:
+        _MPS_STATE["tried"] = True
+        try:
+            import torch
+
+            mps = getattr(torch.backends, "mps", None)
+            _MPS_STATE["available"] = bool(mps is not None and mps.is_available())
+        except Exception:  # noqa: BLE001
+            _MPS_STATE["available"] = False
+    return bool(_MPS_STATE["available"])
+
+
+def _accelerator(vram: MemStat | None) -> str:
+    if vram is not None:
+        return "cuda"
+    return "mps" if _mps_available() else "cpu"
+
+
 @router.get("/stats", response_model=SystemStatsResponse)
 def system_stats(
     cache: SynthCache = Depends(get_synth_cache),
@@ -130,10 +153,12 @@ def system_stats(
         log.debug("Cache size unavailable: %s", exc)
         cache_bytes = 0
 
+    vram = _vram()
     return SystemStatsResponse(
         cpu_percent=psutil.cpu_percent(interval=None),
         ram=ram,
-        vram=_vram(),
+        vram=vram,
         disk=disk,
         cache_bytes=cache_bytes,
+        accelerator=_accelerator(vram),
     )

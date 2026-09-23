@@ -22,3 +22,11 @@ def test_cache_dir_isolated_from_real_dir():
         "Settings().cache_dir points at the REAL backend/cache — tests would "
         "wipe the user's generations. conftest.py must override CACHE_DIR."
     )
+
+
+def test_engine_cache_revision_changes_the_voice_key():
+    from backend.services.synthesize import _voice_cache_key
+
+    base = _voice_cache_key("v", "auto", None, None)
+    assert _voice_cache_key("v", "auto", None, None, revision=None) == base
+    assert _voice_cache_key("v", "auto", None, None, revision="km2") != base

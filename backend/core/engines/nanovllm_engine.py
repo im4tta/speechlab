@@ -3,7 +3,10 @@
 `nano-vllm-voxcpm` needs an NVIDIA GPU, CUDA >= 12, torch >= 2.5, and
 flash-attn — a heavier and more version-sensitive stack than the rest of the
 main venv — so (like Chatterbox / OmniVoice / VoxCPM / Qwen) it never runs in
-this process. This class is a thin proxy that drives
+this process. On machines that can't run nanovllm (Apple Silicon, CPU-only,
+pre-Ampere or < 6 GB NVIDIA GPUs) the same worker falls back to the reference
+`voxcpm` PyTorch runtime with the identical Khmer pipeline — see
+`backend/nanovllm_worker.py` and `core/voxcpm_runtime.py`. This class is a thin proxy that drives
 `backend/nanovllm_worker.py` inside its own venv (`backend/venv-nanovllm`).
 It keeps the exact same `Engine` surface as every other engine, so
 `EngineManager` and `SynthService` need no special-casing.
@@ -54,14 +57,18 @@ class NanoVllmKhmerEngine(Engine):
     name = "nanovllm_km"
     display_name = "VoxCPM2 (nanovllm · Khmer)"
     license = "MIT (runtime) + Apache-2.0 (VoxCPM2 weights)"
-    model_url = "https://github.com/GeeeekExplorer/nano-vllm"
+    model_url = "https://huggingface.co/openbmb/VoxCPM2"
+    # km2: Khmer pipeline v2 (ៗ/dates/money/units, voice anchoring, joins).
+    cache_revision = "km2"
     description = (
-        "OpenBMB's VoxCPM2 served through nanovllm's concurrent-batching "
-        "runtime, tuned for Khmer: Khmer-aware text normalization (numbers, "
-        "symbols) and cluster-safe sentence chunking so long passages are "
-        "generated as several concurrent requests instead of one long "
-        "decode. Voice design, cloning, and transcript-guided cloning. "
-        "Requires an NVIDIA GPU. Runs in its own isolated environment."
+        "OpenBMB's VoxCPM2 tuned for Khmer: Khmer-aware normalization "
+        "(numbers, dates, times, money, units, phone numbers, ៗ), "
+        "cluster-safe sentence chunking, one consistent voice across chunks, "
+        "and seamless joins. On an NVIDIA GPU (RTX 30xx+, 6 GB+) chunks are "
+        "generated concurrently on nanovllm, sized to the card's VRAM; on "
+        "Apple Silicon, CPU or smaller/older GPUs it runs the same pipeline "
+        "on the reference VoxCPM2 runtime. Voice design, cloning, and "
+        "transcript-guided cloning. Runs in its own isolated environment."
     )
 
     def __init__(
@@ -69,11 +76,16 @@ class NanoVllmKhmerEngine(Engine):
         model_id: str = "openbmb/VoxCPM2",
         devices: list[int] | None = None,
         inference_timesteps: int = 10,
-        gpu_memory_utilization: float = 0.9,
-        max_num_seqs: int = 16,
-        max_num_batched_tokens: int = 8192,
-        max_model_len: int = 4096,
+        # nanovllm pool sizing. None = pick automatically from the GPU's VRAM
+        # (core/voxcpm_runtime.py NANO_PROFILES); an explicit value wins.
+        gpu_memory_utilization: float | None = None,
+        max_num_seqs: int | None = None,
+        max_num_batched_tokens: int | None = None,
+        max_model_len: int | None = None,
+        enforce_eager: bool | None = None,
         chunk_max_chars: int = 220,
+        device_request: str = "auto",
+        backend: str = "auto",
         worker_python: Path | None = None,
         worker_script: Path | None = None,
     ) -> None:
@@ -84,7 +96,12 @@ class NanoVllmKhmerEngine(Engine):
         self._max_num_seqs = max_num_seqs
         self._max_num_batched_tokens = max_num_batched_tokens
         self._max_model_len = max_model_len
+        self._enforce_eager = enforce_eager
         self._chunk_max_chars = chunk_max_chars
+        # "auto" lets the worker choose nanovllm (NVIDIA) or the reference
+        # runtime (MPS / CPU / small GPU); "cpu"/"mps" force the reference one.
+        self._device_request = device_request or "auto"
+        self._backend_request = backend or "auto"
         self._worker_python = Path(worker_python) if worker_python else _default_worker_python()
         self._worker_script = Path(worker_script) if worker_script else _default_worker_script()
         self._proc: subprocess.Popen | None = None
@@ -93,7 +110,8 @@ class NanoVllmKhmerEngine(Engine):
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=200)
         self._stderr_thread: threading.Thread | None = None
         self._resolved_sample_rate: int | None = None
-        self._device_request = "cuda"  # nanovllm requires CUDA; no auto/cpu path
+        # What the worker actually picked on load (None until loaded).
+        self._resolved: dict[str, Any] = {}
 
     # -- lifecycle
     def load(self) -> None:
@@ -109,6 +127,7 @@ class NanoVllmKhmerEngine(Engine):
             models_dir = _BACKEND_ROOT / "models"
             env["HF_HOME"] = str(models_dir)
             env["HUGGINGFACE_HUB_CACHE"] = str(models_dir / "hub")
+            env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
             log.info("Spawning nanovllm worker: %s %s", self._worker_python, self._worker_script)
             self._proc = subprocess.Popen(
                 [str(self._worker_python), str(self._worker_script)],
@@ -120,16 +139,7 @@ class NanoVllmKhmerEngine(Engine):
             )
             self._start_stderr_drain()
             resp = self._exchange(
-                {
-                    "op": "load",
-                    "model_id": self._model_id,
-                    "devices": self._devices,
-                    "inference_timesteps": self._inference_timesteps,
-                    "gpu_memory_utilization": self._gpu_memory_utilization,
-                    "max_num_seqs": self._max_num_seqs,
-                    "max_num_batched_tokens": self._max_num_batched_tokens,
-                    "max_model_len": self._max_model_len,
-                },
+                self._load_msg(),
                 timeout=900,  # first load downloads + compiles CUDA graphs
             )
             if not resp.get("ok"):
@@ -137,6 +147,35 @@ class NanoVllmKhmerEngine(Engine):
                 self._kill()
                 raise RuntimeError(f"nanovllm worker failed to load: {err}")
             self._resolved_sample_rate = resp.get("sample_rate")
+            self._resolved = {
+                k: resp.get(k)
+                for k in ("device", "backend", "profile", "fallback_reason", "hardware", "chunk_max_chars")
+            }
+            if resp.get("fallback_reason"):
+                log.info(
+                    "nanovllm_km running on the reference VoxCPM2 runtime (%s): %s",
+                    resp.get("device"), resp.get("fallback_reason"),
+                )
+
+    def _load_msg(self) -> dict[str, Any]:
+        msg: dict[str, Any] = {
+            "op": "load",
+            "model_id": self._model_id,
+            "devices": self._devices,
+            "device": self._device_request,
+            "backend": self._backend_request,
+            "inference_timesteps": self._inference_timesteps,
+        }
+        for key, val in (
+            ("gpu_memory_utilization", self._gpu_memory_utilization),
+            ("max_num_seqs", self._max_num_seqs),
+            ("max_num_batched_tokens", self._max_num_batched_tokens),
+            ("max_model_len", self._max_model_len),
+            ("enforce_eager", self._enforce_eager),
+        ):
+            if val is not None:
+                msg[key] = val
+        return msg
 
     def unload(self) -> None:
         if self._proc is None:
@@ -170,16 +209,22 @@ class NanoVllmKhmerEngine(Engine):
         return model_downloaded(self._model_id)
 
     def engine_info(self) -> dict[str, Any]:
+        backend = self._resolved.get("backend")
+        device = self._resolved.get("device") or self._device_request
         return {
             "model_id": self._model_id,
-            "device": self._device_request,
-            "dtype": "bfloat16",
-            "attn_implementation": "flash_attention_2",
+            "device": device,
+            "runtime": backend,  # "nanovllm" | "reference" | None (not loaded)
+            "profile": self._resolved.get("profile"),
+            "fallback_reason": self._resolved.get("fallback_reason"),
+            "hardware": self._resolved.get("hardware"),
+            "dtype": "float32" if device in ("mps", "cpu") else "bfloat16",
+            "attn_implementation": "flash_attention_2" if backend == "nanovllm" else "sdpa",
         }
 
     # -- capabilities
     def sample_rate(self) -> int:
-        return self._resolved_sample_rate or 16000
+        return self._resolved_sample_rate or 48000  # VoxCPM2 outputs 48 kHz
 
     def max_speakers(self) -> int:
         return 1

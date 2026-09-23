@@ -178,7 +178,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         voices_dir=settings.voices_dir,
         uploads_dir=settings.uploads_dir,
         model_id=settings.model_id,
-        device_request=settings.device if settings.device != "auto" else "cuda",
+        # Pass "auto" through: every engine resolves it itself to CUDA, then
+        # Apple Silicon MPS, then CPU. (Coercing it to "cuda" here used to
+        # push Macs onto the CPU fallback.)
+        device_request=settings.device,
         max_text_chars=settings.max_text_chars,
         default_cfg_scale=settings.default_cfg_scale,
         kokoro_lang_code=settings.kokoro_lang_code,
@@ -198,7 +201,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         nanovllm_inference_timesteps=settings.nanovllm_inference_timesteps,
         nanovllm_gpu_memory_utilization=settings.nanovllm_gpu_memory_utilization,
         nanovllm_max_num_seqs=settings.nanovllm_max_num_seqs,
+        nanovllm_max_model_len=settings.nanovllm_max_model_len,
+        nanovllm_enforce_eager=settings.nanovllm_enforce_eager,
         nanovllm_chunk_max_chars=settings.nanovllm_chunk_max_chars,
+        nanovllm_backend=settings.nanovllm_backend,
     )
 
     # Wire each engine's built-in voice catalog into the registry so

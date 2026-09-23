@@ -269,6 +269,7 @@ class SynthService:
             cache_voice_key = _voice_cache_key(
                 sp0.voice_id, sp0.voice_mode, sp0.instruct, reference_audio,
                 reference_transcript, steps_override, qwen_gen=qwen_gen,
+                revision=getattr(target_engine, "cache_revision", None),
             )
             # Fold the optional knobs into the voice field with a stable
             # delimiter so different knob combos don't share a cache slot.
@@ -536,6 +537,7 @@ def _voice_cache_key(
     reference_text: str | None = None,
     timesteps: int | None = None,
     qwen_gen: str | None = None,
+    revision: str | None = None,
 ) -> str:
     """Cache-key 'voice' component, folding voice-mode/instruct/transcript/quality.
 
@@ -565,6 +567,8 @@ def _voice_cache_key(
         base += f"|ts={timesteps}"
     if qwen_gen:
         base += f"|qg={qwen_gen}"
+    if revision:
+        base += f"|rev={revision}"
     return base
 
 
